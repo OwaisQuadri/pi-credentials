@@ -1,6 +1,6 @@
 # pi-credentials
 
-Status: design. Nothing is built yet.
+Status: the Swift helper is built. The Pi extension is next.
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
@@ -154,6 +154,32 @@ The broker scans saved chat history for credentials that leaked before redaction
 - Per-use Touch ID.
 - A general "run any command with credentials in its environment" action.
 - Credential stores other than macOS Keychain.
+
+## Helper
+
+Build and sign the helper:
+
+```zsh
+./scripts/build.zsh
+```
+
+The script signs with your Developer ID identity when one exists. Set `PI_CREDENTIALS_SIGNING_IDENTITY` to choose another identity.
+
+Each command reads one JSON object from standard input and writes one JSON object to standard output. An error is `{"error": {"code", "message"}}` with exit status 1.
+
+| Command | Input | Touch ID |
+|---|---|---|
+| `list` | `remotes` | No |
+| `register` | `name`, `service`, optional `account`, `kind`, `description`, `hosts`, `apps`, `rotation` | Yes |
+| `add` | `name`, `value`, `kind`, `description`, optional metadata | Yes |
+| `edit` | `name` and the metadata to change | Yes |
+| `grant`, `revoke` | `name`, `scope` | Yes |
+| `group` | `name`, `patterns`; empty patterns remove the group | Yes |
+| `delete` | `name`, optional `isValueDeleted` | Yes |
+| `request` | `name`, `remotes`, `session`, `request` | No |
+| `redact` | `text` | No |
+
+`request` accepts `method`, `url`, `headers`, `body`, `authHeader` (default `Authorization`), and `authPrefix` (default `Bearer `). It requires https, refuses redirects, and redacts every registered value from the response body.
 
 ## License
 

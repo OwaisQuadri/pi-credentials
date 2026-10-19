@@ -6,6 +6,11 @@ let package = Package(
   platforms: [.macOS(.v14)],
   products: [.executable(name: "pi-credentials-helper", targets: ["Helper"])],
   targets: [
-    .executableTarget(name: "Helper", path: "helper/Sources/Helper")
+    .target(name: "CredentialsCore", path: "helper/Sources/CredentialsCore"),
+    .executableTarget(
+      name: "Helper", dependencies: ["CredentialsCore"], path: "helper/Sources/Helper"),
+    .testTarget(
+      name: "CredentialsCoreTests", dependencies: ["CredentialsCore"],
+      path: "helper/Tests/CredentialsCoreTests"),
   ]
 )
