@@ -120,9 +120,10 @@ The input shows text by default, with a mask toggle. You can use the value once 
 When a credential is not granted for the current project, the refusal gives the reason and the fix:
 
 ```
-✗ 'tracker' is not granted for project group 'docs'.
-  Grant it with: /cred grant tracker docs
+'tracker' is not granted for this project. Ask the user to run: /cred grant tracker docs
 ```
+
+When no project group matches the repository, the fix is `/cred grant tracker global, or add a project group for this repository`.
 
 In an interactive session, the agent offers the grant inline, and you confirm with Touch ID. In an unattended session, the agent records the block and moves to other work.
 
@@ -205,7 +206,7 @@ Each command reads one JSON object from standard input and writes one JSON objec
 | Command | Input | Touch ID |
 |---|---|---|
 | `list` | `cwd` | No |
-| `register` | `name`, `service`, optional `account`, `kind`, `description`, `hosts`, `apps`, `rotation` | Yes |
+| `register` | `name`, `service`, `kind`, `description`, optional `account`, `hosts`, `apps`, `rotation` | Yes |
 | `add` | `name`, `value`, `kind`, `description`, optional `service` and metadata | Yes |
 | `edit` | `name` and the metadata to change | Yes |
 | `grant`, `revoke` | `name`, `scope` | Yes |
