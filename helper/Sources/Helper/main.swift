@@ -118,7 +118,10 @@ func redactionValues(_ catalog: Catalog) -> (values: [(name: String, value: Stri
 }
 
 func applyMetadata(_ input: Input, to credential: inout Credential) throws {
-  if let description = input.description {
+  if let description = input.description?.trimmingCharacters(in: .whitespaces) {
+    guard !description.isEmpty else {
+      throw CredentialError("missing-field", "Give a description of what the credential is for.")
+    }
     try Catalog.validatePlain(description, field: "description")
     credential.description = description
   }

@@ -273,9 +273,10 @@ export default function piCredentials(pi: ExtensionAPI) {
 		}, { additionalProperties: false }),
 		async execute(_id, input, signal, _update, ctx) {
 			if (!ctx.hasUI) throw new Error("No user is present to enter a credential. Record the need and continue with other work.");
+			if (!input.description.trim()) throw new Error("Give a description of what the credential is for.");
 			const value = await ctx.ui.input(`${input.reason} · value for ${input.name} (${input.kind})`, "Paste the secret, or press Escape to decline", { signal });
 			if (!value) throw new Error("The user declined to enter the credential.");
-			await callHelper("add", { name: input.name, value, kind: input.kind, description: input.description, hosts: input.hosts ?? [] });
+			await callHelper("add", { name: input.name, value, kind: input.kind, description: input.description.trim(), hosts: input.hosts ?? [] });
 			await refresh(ctx.cwd);
 			return { content: [{ type: "text", text: `Stored as ${input.name}. It is not granted yet; ask the user to run /cred grant ${input.name} <scope>, or call cred_request and accept the grant prompt.` }], details: { name: input.name } };
 		},
