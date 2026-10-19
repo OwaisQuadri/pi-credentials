@@ -94,7 +94,7 @@ export function grepRefusal(path: string | undefined, glob: string | undefined, 
 	if (root === undefined) return Promise.resolve("pi-credentials could not read this path.");
 	if (path !== undefined && isProtectedPath(path, cwd)) return Promise.resolve(grepProtectedMessage);
 	const agent = agentDirectory();
-	const args = ["--files", "--hidden", "--no-config", "--null", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
+	const args = ["--files", "--hidden", "--null", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
 	return new Promise((done) => {
 		let isSettled = false;
 		let pending = "";
@@ -116,7 +116,7 @@ export function grepRefusal(path: string | undefined, glob: string | undefined, 
 		child.on("error", () => finish("pi-credentials could not run ripgrep to check this grep."));
 		child.on("close", (code) => {
 			if (pending && isProtectedFile(pending, cwd, agent)) finish(grepProtectedMessage);
-			else if (code === 0 || code === 1) finish(undefined);
+			else if (code === 0 || code === 1 || (code === 2 && existsSync(root))) finish(undefined);
 			else finish("ripgrep could not list this path. It may be missing or unreadable.");
 		});
 	});

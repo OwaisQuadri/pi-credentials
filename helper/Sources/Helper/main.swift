@@ -45,7 +45,7 @@ func emit<T: Encodable>(_ value: T) {
   let encoder = JSONEncoder()
   encoder.outputFormatting = [.sortedKeys]
   let data = (try? encoder.encode(value)) ?? Data("{}".utf8)
-  FileHandle.standardOutput.write(data + Data("\n".utf8))
+  try? FileHandle.standardOutput.write(contentsOf: data + Data("\n".utf8))
 }
 
 func required<T>(_ value: T?, _ field: String) throws -> T {
