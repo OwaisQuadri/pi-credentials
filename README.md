@@ -1,6 +1,22 @@
 # pi-credentials
 
-Status: the Swift helper is built. The Pi extension is next.
+Status: the helper, `/cred` commands, `cred_list`, `cred_request`, `cred_ask`, and output redaction work. `cred_type`, `cred_sudo`, `cred_notarize`, `.env` creation, and leak warnings are not built yet.
+
+## Install
+
+Requires macOS, Swift 6.4 or newer, and Pi. Installing runs `scripts/build.zsh`, which builds and signs the helper.
+
+```zsh
+pi install git:https://github.com/OwaisQuadri/pi-credentials
+```
+
+Then register a key that is already in Keychain, define a project group, and grant it:
+
+```text
+/cred register openrouter openrouter-api-key api-key
+/cred group work github.com/<org>/*
+/cred grant openrouter global
+```
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
@@ -163,6 +179,18 @@ The broker scans saved chat history for credentials that leaked before redaction
 - Per-use Touch ID.
 - A general "run any command with credentials in its environment" action.
 - Credential stores other than macOS Keychain.
+
+## Agent tools
+
+| Tool | Purpose |
+|---|---|
+| `cred_list` | Names, kinds, descriptions, hosts, and whether this project may use each credential |
+| `cred_request` | An https request with a registered `api-key`. When the credential is not granted and you are present, Pi offers the grant. |
+| `cred_ask` | Asks you to enter a new secret, which goes straight to Keychain |
+
+While `cred_request` runs, the footer shows `🔑 <name>`.
+
+Every tool result passes through `redact` before the model sees it, once at least one `api-key` or `app-password` is registered. If redaction fails, the extension withholds the output and returns an error.
 
 ## Helper
 

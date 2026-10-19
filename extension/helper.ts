@@ -1,0 +1,57 @@
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+export const helperPath = process.env.PI_CREDENTIALS_HELPER ?? fileURLToPath(new URL("../bin/pi-credentials-helper", import.meta.url));
+
+export type Kind = "api-key" | "password" | "app-password" | "passcode";
+export const kinds: Kind[] = ["api-key", "password", "app-password", "passcode"];
+
+export interface Listing {
+	name: string;
+	description: string;
+	kind: Kind;
+	hosts: string[];
+	apps: string[];
+	rotation?: string;
+	grants: string[];
+	isGranted: boolean;
+}
+
+export interface Catalog {
+	credentials: Listing[];
+	groups: Record<string, string[]>;
+	projectGroups: string[];
+}
+
+export class HelperError extends Error {
+	readonly code: string;
+
+	constructor(code: string, message: string) {
+		super(message);
+		this.code = code;
+	}
+}
+
+export function callHelper<T>(command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(helperPath, [command], { stdio: ["pipe", "pipe", "ignore"], signal });
+		let output = "";
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => { output += chunk; });
+		child.on("error", (error) => reject(new HelperError("helper-unavailable", `pi-credentials helper failed to start (${error.message}). Run scripts/build.zsh in the package.`)));
+		child.on("close", () => {
+			let parsed: { error?: { code: string; message: string } } & T;
+			try { parsed = JSON.parse(output); }
+			catch { return reject(new HelperError("helper-output", "pi-credentials helper returned invalid output.")); }
+			if (parsed.error) return reject(new HelperError(parsed.error.code, parsed.error.message));
+			resolve(parsed);
+		});
+		child.stdin.end(JSON.stringify(input));
+	});
+}
+
+export function describeListing(listing: Listing): string {
+	const hosts = listing.kind === "api-key" ? ` · ${listing.hosts.length ? listing.hosts.join(", ") : "any host"}` : "";
+	const scope = listing.grants.length ? listing.grants.join(", ") : "not granted";
+	return `${listing.kind}${hosts} · ${scope} · ${listing.description}`;
+}
