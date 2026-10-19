@@ -66,14 +66,23 @@ func credDirectory() -> String {
     ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"]
     ?? NSHomeDirectory() + "/.pi/agent"
   let directory = root + "/cred"
-  mkdir(directory, 0o700)
+  try? FileManager.default.createDirectory(
+    atPath: directory, withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700])
   return directory
+}
+
+func requireUnreserved(_ service: String) throws {
+  guard service != Keychain.catalogService, !service.hasPrefix(Keychain.stagingPrefix) else {
+    throw CredentialError("invalid-service", "That Keychain service is reserved for the helper.")
+  }
 }
 
 func lockCatalog() throws {
   let descriptor = open(credDirectory() + "/catalog.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
   guard descriptor >= 0, flock(descriptor, LOCK_EX) == 0 else {
-    throw CredentialError("lock-failed", "Could not lock the credential catalog.")
+    throw CredentialError(
+      "lock-failed", "Could not lock the credential catalog: \(String(cString: strerror(errno))).")
   }
 }
 
@@ -177,9 +186,7 @@ func run(_ command: String, _ input: Input) async throws {
     if command == "register" {
       let service = try required(input.service, "service")
       try Catalog.validatePlain(service, field: "service")
-      guard service != Keychain.catalogService else {
-        throw CredentialError("invalid-service", "The catalog item cannot be registered.")
-      }
+      try requireUnreserved(service)
       let account: String
       do {
         account = try Keychain.resolveAccount(service: service, account: input.account)
@@ -206,7 +213,10 @@ func run(_ command: String, _ input: Input) async throws {
     } else {
       let value = try required(input.value, "value")
       guard !value.isEmpty else { throw CredentialError("missing-field", "Provide a value.") }
-      if let service = input.service { try Catalog.validatePlain(service, field: "service") }
+      if let service = input.service {
+        try Catalog.validatePlain(service, field: "service")
+        try requireUnreserved(service)
+      }
       credential.service = input.service ?? "pi-credentials/\(name)"
       credential.account = name
       try Keychain.authenticateOwner(reason: "store a new credential '\(name)': \(summary(credential))")
