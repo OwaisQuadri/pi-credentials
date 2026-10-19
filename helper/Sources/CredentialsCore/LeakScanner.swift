@@ -38,10 +38,10 @@ public struct LeakScanner: Sendable {
   public init(redactor: Redactor) {
     self.redactor = redactor
     needles = redactor.forms.map { (Array($0.text.utf8), String($0.label.dropFirst(6).dropLast())) }
-    var fingerprints: [String: String] = [:]
-    for needle in needles where fingerprints[needle.name] == nil {
-      fingerprints[needle.name] = Self.fingerprint(String(decoding: needle.bytes, as: UTF8.self))
+    let forms = Dictionary(grouping: needles, by: \.name).mapValues { group in
+      group.map { String(decoding: $0.bytes, as: UTF8.self) }.sorted().joined(separator: "\n")
     }
+    let fingerprints = forms.mapValues(Self.fingerprint)
     valueFingerprints = fingerprints
     signature = Self.fingerprint(fingerprints.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n"))
   }

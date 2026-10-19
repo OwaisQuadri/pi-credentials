@@ -156,4 +156,7 @@ let catalog = Catalog(
   #expect(same.seen(ScanEntry.nameKey("router", same.findings)) == 100)
   let mixed = new.scan(Data("[cred-scrubbed:router] second-secret-value-456".utf8))
   #expect(mixed.names == ["router"] && mixed.values?["router"] != nil)
+  let tied = LeakScanner(redactor: Redactor(values: [("x", "abcdefgh~")]))
+  let forms = tied.needles.map { String(decoding: $0.bytes, as: UTF8.self) }.sorted().joined(separator: "\n")
+  #expect(tied.scan(Data("abcdefgh~".utf8)).values?["x"] == LeakScanner.fingerprint(forms))
 }
