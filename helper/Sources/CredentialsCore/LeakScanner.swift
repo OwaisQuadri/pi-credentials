@@ -1,0 +1,152 @@
+import CryptoKit
+import Darwin
+import Foundation
+
+public struct LeakFindings: Codable, Equatable, Sendable {
+  public var names: [String] = []
+  public var unknown: [String: String] = [:]
+
+  public var isEmpty: Bool { names.isEmpty && unknown.isEmpty }
+}
+
+public struct LeakScanner: Sendable {
+  public struct KeyFormat: Sendable {
+    public let prefix: String
+    let minimumLength: Int
+  }
+
+  public static let keyFormats = [
+    KeyFormat(prefix: "sk-or-v1-", minimumLength: 40),
+    KeyFormat(prefix: "sk-ant-", minimumLength: 30),
+    KeyFormat(prefix: "sk-proj-", minimumLength: 30),
+    KeyFormat(prefix: "sk-", minimumLength: 32),
+    KeyFormat(prefix: "lin_api_", minimumLength: 30),
+    KeyFormat(prefix: "github_pat_", minimumLength: 40),
+    KeyFormat(prefix: "ghp_", minimumLength: 30),
+    KeyFormat(prefix: "gho_", minimumLength: 30),
+    KeyFormat(prefix: "xoxb-", minimumLength: 30),
+    KeyFormat(prefix: "xoxp-", minimumLength: 30),
+  ]
+
+  let redactor: Redactor
+  let needles: [(bytes: [UInt8], name: String)]
+
+  public init(redactor: Redactor) {
+    self.redactor = redactor
+    needles = redactor.forms.map { (Array($0.text.utf8), String($0.label.dropFirst(6).dropLast())) }
+  }
+
+  static func isTokenByte(_ byte: UInt8) -> Bool {
+    (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte) || byte == 45
+      || byte == 95
+  }
+
+  static let placeholderMarks = [
+    "xxxx", "0000", "1234", "abcd", "example", "your", "test", "dummy", "fake", "placeholder",
+    "redacted", "sample", "here",
+  ]
+
+  static func isPlaceholder(_ token: String, prefix: String) -> Bool {
+    let body = token.dropFirst(prefix.count).lowercased()
+    return Set(body).count < 12 || placeholderMarks.contains { body.contains($0) }
+  }
+
+  public static func fingerprint(_ token: String) -> String {
+    SHA256.hash(data: Data(token.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+  }
+
+  static func occurrences(of needle: [UInt8], in buffer: UnsafeRawBufferPointer) -> [Int] {
+    guard let base = buffer.baseAddress, !needle.isEmpty else { return [] }
+    var offsets: [Int] = []
+    var offset = 0
+    while offset < buffer.count,
+      let found = needle.withUnsafeBytes({
+        memmem(base + offset, buffer.count - offset, $0.baseAddress, needle.count)
+      })
+    {
+      let position = base.distance(to: UnsafeRawPointer(found))
+      offsets.append(position)
+      offset = position + 1
+    }
+    return offsets
+  }
+
+  func tokens(in data: Data) -> [(token: String, prefix: String)] {
+    data.withUnsafeBytes { buffer in
+      var seen: [(range: Range<Int>, token: String, prefix: String)] = []
+      for format in Self.keyFormats {
+        for start in Self.occurrences(of: Array(format.prefix.utf8), in: buffer)
+        where !seen.contains(where: { $0.range.contains(start) }) {
+          if start > 0 && Self.isTokenByte(buffer[start - 1]) { continue }
+          var end = start + format.prefix.utf8.count
+          while end < buffer.count && Self.isTokenByte(buffer[end]) { end += 1 }
+          guard end - start >= format.minimumLength, end - start <= 256 else { continue }
+          let token = String(decoding: buffer[start..<end], as: UTF8.self)
+          guard !Self.isPlaceholder(token, prefix: format.prefix) else { continue }
+          seen.append((start..<end, token, format.prefix))
+        }
+      }
+      return seen.sorted { $0.range.lowerBound < $1.range.lowerBound }.map { ($0.token, $0.prefix) }
+    }
+  }
+
+  static let scrubbedMark = Array("[cred-scrubbed:".utf8)
+  static let unknownMark = Array("[cred:unknown-".utf8)
+
+  func scrubbedLabels(in data: Data) -> (names: [String], unknown: [String: String]) {
+    data.withUnsafeBytes { buffer in
+      var names: [String] = []
+      var unknown: [String: String] = [:]
+      for (mark, isUnknown) in [(Self.scrubbedMark, false), (Self.unknownMark, true)] {
+        for start in Self.occurrences(of: mark, in: buffer) {
+          var end = start + mark.count
+          while end < buffer.count && end - start < 128 && buffer[end] != UInt8(ascii: "]") { end += 1 }
+          guard end < buffer.count, buffer[end] == UInt8(ascii: "]") else { continue }
+          let body = String(decoding: buffer[(start + mark.count)..<end], as: UTF8.self)
+          if !isUnknown {
+            if !names.contains(body) { names.append(body) }
+          } else if let format = Self.keyFormats.first(where: { body.hasPrefix($0.prefix) }) {
+            let fingerprint = String(body.dropFirst(format.prefix.count))
+            if fingerprint.count == 12 && fingerprint.allSatisfy(\.isHexDigit) {
+              unknown[fingerprint] = format.prefix
+            }
+          }
+        }
+      }
+      return (names, unknown)
+    }
+  }
+
+  public func scan(_ data: Data) -> LeakFindings {
+    var findings = LeakFindings()
+    let labels = scrubbedLabels(in: data)
+    findings.names = labels.names
+    findings.unknown = labels.unknown
+    data.withUnsafeBytes { buffer in
+      for needle in needles where !findings.names.contains(needle.name) {
+        guard let base = buffer.baseAddress else { break }
+        let isFound = needle.bytes.withUnsafeBytes {
+          memmem(base, buffer.count, $0.baseAddress, needle.bytes.count) != nil
+        }
+        if isFound { findings.names.append(needle.name) }
+      }
+    }
+    for (token, prefix) in tokens(in: data) {
+      let isRegistered = needles.contains { needle in
+        let text = String(decoding: needle.bytes, as: UTF8.self)
+        return token.contains(text) || text.contains(token)
+      }
+      if !isRegistered { findings.unknown[Self.fingerprint(token)] = prefix }
+    }
+    findings.names.sort()
+    return findings
+  }
+
+  public func scrub(_ data: Data) -> Data {
+    var text = redactor.redact(String(decoding: data, as: UTF8.self), labelPrefix: "cred-scrubbed").text
+    for (token, prefix) in tokens(in: Data(text.utf8)) {
+      text = text.replacingOccurrences(of: token, with: "[cred:unknown-\(prefix)\(Self.fingerprint(token))]")
+    }
+    return Data(text.utf8)
+  }
+}

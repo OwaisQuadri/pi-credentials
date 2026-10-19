@@ -86,3 +86,25 @@ let catalog = Catalog(
   }
   #expect(redactor.redact("code 1234567").text == "code 1234567")
 }
+
+@Test func leakScanFindsRegisteredAndUnknownKeysOnly() {
+  let registered = "sk-or-v1-" + String(repeating: "a1", count: 32)
+  let unknown = "lin_api_Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUi"
+  let scanner = LeakScanner(redactor: Redactor(values: [("router", registered)]))
+  let encoded = Data(registered.utf8).base64EncodedString()
+  let text = "{\"text\":\"\(encoded) and \(registered) then \(unknown); task-sk-" + String(repeating: "x", count: 40) + "\"}"
+  let findings = scanner.scan(Data(text.utf8))
+  #expect(findings.names == ["router"])
+  #expect(findings.unknown == [LeakScanner.fingerprint(unknown): "lin_api_"])
+  let scrubbed = String(decoding: scanner.scrub(Data(text.utf8)), as: UTF8.self)
+  #expect(!scrubbed.contains(registered) && !scrubbed.contains(encoded) && !scrubbed.contains(unknown))
+  #expect(scanner.scan(Data(scrubbed.utf8)) == findings)
+  #expect(scanner.scan(Data("no keys here: sk-short".utf8)).isEmpty)
+}
+
+@Test func leakScanSkipsPlaceholderKeys() {
+  let scanner = LeakScanner(redactor: Redactor(values: []))
+  for text in ["sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sk-proj-your-key-goes-here-1234567890abcdefgh", "ghp_" + String(repeating: "A", count: 36)] {
+    #expect(scanner.scan(Data(text.utf8)).isEmpty, "\(text)")
+  }
+}

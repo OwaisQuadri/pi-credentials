@@ -22,6 +22,8 @@ struct Input: Decodable {
   var env: String?
   var arguments: [String]?
   var app: String?
+  var isFull: Bool?
+  var exclude: String?
   var isActivating: Bool?
   var isReturnPressed: Bool?
   var path: String?
@@ -39,6 +41,7 @@ struct Listing: Encodable {
   var env: String
   var grants: [String]
   var isGranted: Bool
+  var lastUse: String?
 }
 
 func emit<T: Encodable>(_ value: T) {
@@ -95,13 +98,17 @@ func lockCatalog() throws {
   }
 }
 
-func logUse(_ input: Input, groups: [String], action: String, target: String, result: String) {
+func logUse(
+  _ input: Input, groups: [String], action: String, target: String, result: String,
+  isRefused: Bool = false
+) {
   let directory = credDirectory()
-  let entry: [String: String] = [
+  var entry: [String: String] = [
     "time": ISO8601DateFormatter().string(from: Date()), "credential": input.name ?? "",
     "action": action, "target": target, "groups": groups.joined(separator: " "),
     "session": input.session ?? "", "result": result,
   ]
+  if isRefused { entry["refused"] = "true" }
   guard var line = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys])
   else { return }
   line.append(UInt8(ascii: "\n"))
@@ -110,6 +117,20 @@ func logUse(_ input: Input, groups: [String], action: String, target: String, re
   defer { close(descriptor) }
   fchmod(descriptor, 0o600)
   _ = line.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
+}
+
+func lastUses() -> [String: String] {
+  guard let data = FileManager.default.contents(atPath: credDirectory() + "/usage.jsonl") else {
+    return [:]
+  }
+  var uses: [String: String] = [:]
+  for line in data.split(separator: UInt8(ascii: "\n")) {
+    guard let entry = try? JSONSerialization.jsonObject(with: line) as? [String: String],
+      let name = entry["credential"], let time = entry["time"], entry["refused"] == nil
+    else { continue }
+    uses[name] = time
+  }
+  return uses
 }
 
 func redactionValues(_ catalog: Catalog) -> (values: [(name: String, value: String)], unavailable: [String]) {
@@ -168,7 +189,8 @@ func summary(_ credential: Credential) -> String {
 }
 
 func run(_ command: String, _ input: Input) async throws {
-  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete"].contains(command)
+  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete", "rotated", "scrub"]
+    .contains(command)
   if isMutating { try lockCatalog() }
   var catalog = try Keychain.loadCatalog()
   if isMutating, try Keychain.isCatalogStaged() { try Keychain.saveCatalog(catalog) }
@@ -176,11 +198,13 @@ func run(_ command: String, _ input: Input) async throws {
   let projectGroups = catalog.groups(forRemotes: projectRemotes)
   switch command {
   case "list":
+    let uses = lastUses()
     let listings = catalog.credentials.sorted { $0.key < $1.key }.map { name, credential in
       Listing(
         name: name, description: credential.description, kind: credential.kind,
         hosts: credential.hosts, apps: credential.apps, rotation: credential.rotation,
-        env: credential.env ?? Credential.defaultEnvName(name), grants: credential.grants, isGranted: catalog.isGranted(name, remotes: projectRemotes))
+        env: credential.env ?? Credential.defaultEnvName(name), grants: credential.grants, isGranted: catalog.isGranted(name, remotes: projectRemotes),
+        lastUse: uses[name])
     }
     struct Output: Encodable {
       var credentials: [Listing]
@@ -336,7 +360,7 @@ func run(_ command: String, _ input: Input) async throws {
     let name = try required(input.name, "name")
     let host = (try? required(input.request, "request")).flatMap { URL(string: $0.url)?.host } ?? "?"
     func refuse(_ error: CredentialError) -> CredentialError {
-      logUse(input, groups: projectGroups, action: "request", target: host, result: error.code)
+      logUse(input, groups: projectGroups, action: "request", target: host, result: error.code, isRefused: true)
       return error
     }
     guard let credential = catalog.credentials[name] else {
@@ -373,7 +397,7 @@ func run(_ command: String, _ input: Input) async throws {
     let target =
       command == "type" ? (input.app ?? "?") : describeCommand(input.arguments ?? []).prefix(200).description
     func refuse(_ error: CredentialError) -> CredentialError {
-      logUse(input, groups: projectGroups, action: command, target: target, result: error.code)
+      logUse(input, groups: projectGroups, action: command, target: target, result: error.code, isRefused: true)
       return error
     }
     guard let credential = catalog.credentials[name] else {
@@ -495,6 +519,58 @@ func run(_ command: String, _ input: Input) async throws {
       var skipped: [String]
     }
     emit(Output(path: path, variables: variables, unavailable: unavailable, skipped: skipped))
+
+  case "scan":
+    let result = try scanSessions(catalog, isFull: input.isFull ?? false)
+    emit(report(result.state, catalog: catalog, scanned: result.scanned))
+
+  case "rotated":
+    let name = try required(input.name, "name")
+    let now = Date().timeIntervalSince1970
+    if var credential = catalog.credentials[name] {
+      try Keychain.authenticateOwner(
+        reason: "mark '\(name)' as rotated, which hides its leak warnings for sessions saved before now")
+      credential.rotatedAt = now
+      catalog.credentials[name] = credential
+    } else if LeakScanner.keyFormats.contains(where: { $0.prefix == name }) {
+      let fingerprints = Set(
+        loadScanState().files.values.flatMap { entry in
+          entry.findings.unknown.filter { $0.value == name }.map(\.key)
+        })
+      try Keychain.authenticateOwner(
+        reason:
+          "mark all \(fingerprints.count) unregistered \(name) keys as rotated, which hides their leak warnings for sessions saved before now"
+      )
+      var dismissed = catalog.dismissed ?? [:]
+      for fingerprint in fingerprints { dismissed[fingerprint] = now }
+      catalog.dismissed = dismissed
+    } else {
+      guard name.count == 12, name.allSatisfy(\.isHexDigit) else {
+        throw CredentialError(
+          "unknown-credential", "Use a credential name, a key format such as sk-ant-, or an unknown key's fingerprint.")
+      }
+      try Keychain.authenticateOwner(
+        reason: "mark unknown key \(name) as rotated, which hides its leak warnings for sessions saved before now")
+      catalog.dismissed = (catalog.dismissed ?? [:]).merging([name: now]) { _, new in new }
+    }
+    try Keychain.saveCatalog(catalog)
+    emit(report(loadScanState(), catalog: catalog, scanned: 0))
+
+  case "scrub":
+    let state = loadScanState()
+    let count = state.files.keys.filter { $0 != input.exclude }.count
+    try Keychain.authenticateOwner(
+      reason: "rewrite \(count) saved session files, replacing leaked credential values with markers; sessions changed in the last 10 minutes are skipped")
+    let result = try scrubSessions(catalog, excluding: input.exclude)
+    struct Output: Encodable {
+      var rewritten: Int
+      var skipped: Int
+      var report: LeakReport
+    }
+    emit(
+      Output(
+        rewritten: result.rewritten, skipped: result.skipped,
+        report: report(loadScanState(), catalog: catalog, scanned: 0)))
 
   case "redact":
     let redaction = redactionValues(catalog)
