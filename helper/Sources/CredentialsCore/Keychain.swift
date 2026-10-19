@@ -5,6 +5,7 @@ import Security
 public enum Keychain {
   public static let catalogService = "pi-credentials.catalog"
   static let catalogAccount = "catalog"
+  static let catalogStagingAccount = "catalog.next"
   public static let stagingPrefix = "pi-credentials.staging."
 
   static func baseQuery(service: String, account: String?) -> [String: Any] {
@@ -54,17 +55,6 @@ public enum Keychain {
       throw failure(status, "Read '\(service)'")
     }
     return data
-  }
-
-  public static func write(service: String, account: String, data: Data) throws {
-    var query = baseQuery(service: service, account: account)
-    let status = SecItemUpdate(
-      query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-    if status == errSecSuccess { return }
-    guard status == errSecItemNotFound else { throw failure(status, "Update '\(service)'") }
-    query[kSecValueData as String] = data
-    let addStatus = SecItemAdd(query as CFDictionary, nil)
-    guard addStatus == errSecSuccess else { throw failure(addStatus, "Add '\(service)'") }
   }
 
   public static func delete(service: String, account: String) throws {
@@ -138,14 +128,24 @@ public enum Keychain {
       let data = try read(service: catalogService, account: catalogAccount)
       return try JSONDecoder().decode(Catalog.self, from: data)
     } catch let error as CredentialError where error.code == "keychain-missing" {
-      return Catalog()
+      do {
+        let data = try read(service: catalogService, account: catalogStagingAccount)
+        return try JSONDecoder().decode(Catalog.self, from: data)
+      } catch let staging as CredentialError where staging.code == "keychain-missing" {
+        return Catalog()
+      }
     }
   }
 
   public static func saveCatalog(_ catalog: Catalog) throws {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
-    try write(service: catalogService, account: catalogAccount, data: encoder.encode(catalog))
+    let data = try encoder.encode(catalog)
+    try delete(service: catalogService, account: catalogStagingAccount)
+    try add(service: catalogService, account: catalogStagingAccount, data: data)
+    try delete(service: catalogService, account: catalogAccount)
+    try add(service: catalogService, account: catalogAccount, data: data)
+    try delete(service: catalogService, account: catalogStagingAccount)
   }
 
   public static func value(of credential: Credential) throws -> String {
