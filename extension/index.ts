@@ -19,6 +19,21 @@ const subcommands: Record<string, string> = {
 	env: "Write a .env file with the credentials granted to this project",
 };
 
+interface EnvResult {
+	path: string;
+	variables: string[];
+	unavailable: string[];
+	skipped: string[];
+}
+
+function describeEnv(result: EnvResult): string {
+	return [
+		`Wrote ${result.path} with ${result.variables.join(", ")}.`,
+		result.unavailable.length ? `Could not read: ${result.unavailable.join(", ")}.` : "",
+		result.skipped.length ? `Skipped (under 8 characters): ${result.skipped.join(", ")}.` : "",
+	].filter(Boolean).join(" ");
+}
+
 interface ProcessResult {
 	status: number;
 	stdout: string;
@@ -46,13 +61,48 @@ export function isProtectedPath(input: string, cwd: string): boolean {
 	const full = realPath(isAbsolute(text) ? resolve(text) : resolve(cwd, text)).toLowerCase();
 	const base = basename(full);
 	if (base === ".env" || (base.startsWith(".env.") && !templateSuffixes.some((suffix) => base.endsWith(suffix)))) return true;
-	const agent = realPath(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")).toLowerCase();
+	const agent = agentDirectory();
 	return ["auth.json", "mcp-auth.json"].some((name) => full === join(agent, name));
 }
 
-function isProtectedGlob(glob: string): boolean {
-	const text = glob.toLowerCase();
-	return text.includes(".env") && !templateSuffixes.some((suffix) => text.endsWith(suffix)) || /(^|\/)(mcp-)?auth\.json$/.test(text);
+function globToRegExp(glob: string): RegExp {
+	let pattern = "";
+	for (let index = 0; index < glob.length; index += 1) {
+		const character = glob[index];
+		if (character === "*" && glob[index + 1] === "*") {
+			pattern += ".*";
+			index += glob[index + 2] === "/" ? 2 : 1;
+		} else if (character === "*") pattern += "[^/]*";
+		else if (character === "?") pattern += "[^/]";
+		else if (character === "{") pattern += "(?:";
+		else if (character === "}") pattern += ")";
+		else if (character === "," ) pattern += "|";
+		else if (character === "[") {
+			const close = glob.indexOf("]", index + 1);
+			if (close < 0) pattern += "\\[";
+			else {
+				pattern += `[${glob.slice(index + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+				index = close;
+			}
+		} else pattern += character.replace(/[.+^$()|\\]/g, "\\$&");
+	}
+	return new RegExp(`^${pattern}$`, "i");
+}
+
+function agentDirectory(): string {
+	return realPath(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")).toLowerCase();
+}
+
+export function isProtectedGlob(glob: string, searchPath: string, cwd: string): boolean {
+	const root = realPath(resolve(cwd, searchPath)).toLowerCase();
+	const agent = agentDirectory();
+	const isAgentInScope = agent === root || agent.startsWith(root.endsWith("/") ? root : `${root}/`);
+	const names = [".env", ".env.local", ".env.production", ...(isAgentInScope ? ["auth.json", "mcp-auth.json"] : [])];
+	if (glob.trim().startsWith("!")) return true;
+	let expression: RegExp;
+	try { expression = globToRegExp(glob.trim()); }
+	catch { return true; }
+	return names.some((name) => expression.test(name) || expression.test(`a/${name}`) || expression.test(`a/b/${name}`));
 }
 
 interface HTTPResponse {
@@ -154,12 +204,17 @@ async function askMetadata(ctx: ExtensionContext, kind?: Kind) {
 	const description = await ctx.ui.input("Description", "What is this credential for?");
 	if (!description?.trim()) return undefined;
 	let hosts: string[] = [];
+	let apps: string[] = [];
 	if (selectedKind === "api-key") {
 		const text = await ctx.ui.input("Allowed hosts", "api.example.com, *.example.org (empty means any host)");
 		if (text === undefined) return undefined;
 		hosts = text.split(",").map((host) => host.trim()).filter(Boolean);
+	} else if (selectedKind === "password" || selectedKind === "passcode") {
+		const text = await ctx.ui.input("Apps that may receive it by typing", "Bundle identifiers, such as com.apple.ScreenContinuity (empty means no typing)");
+		if (text === undefined) return undefined;
+		apps = text.split(",").map((app) => app.trim()).filter(Boolean);
 	}
-	return { kind: selectedKind, description: description.trim(), hosts };
+	return { kind: selectedKind, description: description.trim(), hosts, apps };
 }
 
 async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<string | undefined> {
@@ -245,8 +300,8 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			return `Deleted ${name}.`;
 		}
 		case "env": {
-			const result = await callHelper<{ path: string; variables: string[]; unavailable: string[] }>("env", { cwd, path: name, session: ctx.sessionManager.getSessionId() });
-			return `Wrote ${result.path} with ${result.variables.join(", ") || "no variables"}.${result.unavailable.length ? ` Could not read: ${result.unavailable.join(", ")}.` : ""}`;
+			const result = await callHelper<EnvResult>("env", { cwd, path: name, session: ctx.sessionManager.getSessionId() });
+			return describeEnv(result);
 		}
 		default:
 			throw new HelperError("unknown-subcommand", `Unknown subcommand ${subcommand}. Use ${Object.keys(subcommands).join(", ")}.`);
@@ -280,7 +335,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 		const input = event.input as { path?: unknown; glob?: unknown };
 		const path = typeof input.path === "string" ? input.path : undefined;
 		const glob = event.toolName === "grep" && typeof input.glob === "string" ? input.glob : undefined;
-		const isProtected = (path !== undefined && isProtectedPath(path, ctx.cwd)) || (glob !== undefined && isProtectedGlob(glob));
+		const isProtected = (path !== undefined && isProtectedPath(path, ctx.cwd)) || (glob !== undefined && isProtectedGlob(glob, path ?? ".", ctx.cwd));
 		if (!isProtected) return undefined;
 		return { block: true, reason: "pi-credentials protects .env and Pi auth files. Use cred_list and the cred tools, or cred_env to write a .env file." };
 	});
@@ -352,8 +407,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 			names: Type.Optional(Type.Array(Type.String(), { description: "Credentials to include. Default: every granted api-key and app-password." })),
 		}, { additionalProperties: false }),
 		async execute(_id, input, signal, _update, ctx) {
-			const result = await callHelper<{ path: string; variables: string[]; unavailable: string[] }>("env", { ...base(ctx), ...input }, signal);
-			const text = `Wrote ${result.path} with ${result.variables.join(", ") || "no variables"}.${result.unavailable.length ? ` Could not read: ${result.unavailable.join(", ")}.` : ""}`;
+			const result = await callHelper<EnvResult>("env", { ...base(ctx), ...input }, signal);
+			const text = describeEnv(result);
 			return { content: [{ type: "text", text }], details: result };
 		},
 	});

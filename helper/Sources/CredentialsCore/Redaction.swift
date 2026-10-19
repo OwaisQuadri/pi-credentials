@@ -6,6 +6,8 @@ public struct Redactor: Sendable {
 
   let forms: [(text: String, label: String)]
 
+  public var longestForm: Int { forms.map { $0.text.utf8.count }.max() ?? 0 }
+
   public init(values: [(name: String, value: String)]) {
     var forms: [(String, String)] = []
     let unreserved = CharacterSet(

@@ -26,4 +26,4 @@ if ! result=$(print -r -- "$request" | "$helper" env); then
   print -u2 -r -- "cred: ${message:-the helper failed}"
   exit 1
 fi
-print -r -- "$result" | jq -r '"Wrote \(.path) with \(if (.variables | length) > 0 then (.variables | join(", ")) else "no variables" end)." + (if (.unavailable | length) > 0 then " Could not read: \(.unavailable | join(", "))." else "" end)'
+print -r -- "$result" | jq -r '"Wrote \(.path) with \(.variables | join(", "))." + (if (.unavailable | length) > 0 then " Could not read: \(.unavailable | join(", "))." else "" end) + (if (.skipped // [] | length) > 0 then " Skipped (under 8 characters): \(.skipped | join(", "))." else "" end)'

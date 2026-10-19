@@ -410,19 +410,23 @@ func run(_ command: String, _ input: Input) async throws {
       let redactor = Redactor(values: redaction.values + [(name, value)])
       switch command {
       case "notarize":
-        let result = try notarize(
-          try required(input.arguments, "arguments"), value: value, cwd: input.cwd, redactor: redactor)
+        let arguments = try required(input.arguments, "arguments")
+        let result = try Cancellation.shared.guarded {
+          try notarize(arguments, value: value, cwd: input.cwd, redactor: redactor)
+        }
         logUse(input, groups: projectGroups, action: command, target: target, result: String(result.status))
         emit(result)
       case "sudo":
         let timeout = min(max(input.timeoutSeconds ?? 600, 1), 3600)
-        let result = try runSudo(resolved, value: value, cwd: input.cwd, timeout: timeout, redactor: redactor)
+        let result = try Cancellation.shared.guarded {
+          try runSudo(resolved, value: value, cwd: input.cwd, timeout: timeout, redactor: redactor)
+        }
         logUse(input, groups: projectGroups, action: command, target: target, result: String(result.status))
         emit(result)
       default:
         let app = try required(input.app, "app")
         let typed = try typeValue(
-          value, into: app, credential: credential, isActivating: input.isActivating ?? true,
+          value, name: name, into: app, credential: credential, isActivating: input.isActivating ?? true,
           isReturnPressed: input.isReturnPressed ?? false)
         logUse(input, groups: projectGroups, action: command, target: typed, result: "typed")
         emit(["typed": typed])
@@ -507,6 +511,7 @@ func run(_ command: String, _ input: Input) async throws {
   }
 }
 
+let cancellationSources = installCancellation()
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard arguments.count == 1 else {
   FileHandle.standardError.write(Data("usage: pi-credentials-helper <command> < request.json\n".utf8))

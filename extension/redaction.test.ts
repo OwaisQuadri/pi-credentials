@@ -43,7 +43,15 @@ test("credential variables leave the Pi process and protected files stay unread"
 		assert.equal((await handlers.tool_call({ toolName: "read", input: { path } }, ctx))?.block, true, path);
 	}
 	assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", path: ".env" } }, ctx))?.block, true);
-	assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", glob: "**/.env*" } }, ctx))?.block, true);
+	for (const glob of ["**/.env*", "*", ".e*", "**", "{a,.env}", "!*.ts"]) {
+		assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", glob } }, ctx))?.block, true, glob);
+	}
+	for (const glob of ["*.ts", "src/**/*.swift", "*.md", ".env.example", "*.json"]) {
+		assert.equal(await handlers.tool_call({ toolName: "grep", input: { pattern: ".", glob } }, ctx), undefined, glob);
+	}
+	for (const glob of ["*.json", "auth.*"]) {
+		assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", path: join(directory, "agent"), glob } }, ctx))?.block, true, glob);
+	}
 	for (const path of [".env.example", "auth.json", "src/env.ts"]) {
 		assert.equal(await handlers.tool_call({ toolName: "read", input: { path } }, ctx), undefined, path);
 	}

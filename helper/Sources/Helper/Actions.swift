@@ -14,15 +14,64 @@ struct ProcessResult: Encodable {
 
 let outputLimit = 1_000_000
 
+final class Cancellation: @unchecked Sendable {
+  static let shared = Cancellation()
+  private let lock = NSLock()
+  private var isCancelledValue = false
+  private var isExitAllowedValue = true
+
+  var isCancelled: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return isCancelledValue
+  }
+
+  func cancel() {
+    lock.lock()
+    isCancelledValue = true
+    let isExitAllowed = isExitAllowedValue
+    lock.unlock()
+    if isExitAllowed { exit(130) }
+  }
+
+  func guarded<T>(_ body: () throws -> T) rethrows -> T {
+    lock.lock()
+    isExitAllowedValue = false
+    let isCancelled = isCancelledValue
+    lock.unlock()
+    defer {
+      lock.lock()
+      isExitAllowedValue = true
+      lock.unlock()
+    }
+    if isCancelled { exit(130) }
+    return try body()
+  }
+}
+
+func installCancellation() -> [DispatchSourceSignal] {
+  [SIGTERM, SIGINT, SIGHUP].map { number in
+    signal(number) { _ in }
+    let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+    source.setEventHandler { Cancellation.shared.cancel() }
+    source.resume()
+    return source
+  }
+}
+
 final class OutputBuffer: @unchecked Sendable {
   private let lock = NSLock()
   private var data = Data()
   private var isOverflowed = false
+  let limit: Int
+  let finished = DispatchSemaphore(value: 0)
+
+  init(limit: Int) { self.limit = limit }
 
   func append(_ chunk: Data) {
     lock.lock()
     defer { lock.unlock() }
-    let room = outputLimit + 64 - data.count
+    let room = limit - data.count
     if chunk.count > room {
       data.append(chunk.prefix(max(room, 0)))
       isOverflowed = true
@@ -40,7 +89,7 @@ final class OutputBuffer: @unchecked Sendable {
 
 func runProcess(
   _ executable: String, _ arguments: [String], input: Data?, cwd: String?, timeout: TimeInterval,
-  redactor: Redactor
+  redactor: Redactor, forceStop: ((pid_t) -> Void)? = nil
 ) throws -> ProcessResult {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: executable)
@@ -48,14 +97,19 @@ func runProcess(
   if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
   let stdin = Pipe()
   let outputs = [Pipe(), Pipe()]
-  let buffers = [OutputBuffer(), OutputBuffer()]
+  let buffers = [0, 1].map { _ in OutputBuffer(limit: outputLimit + redactor.longestForm) }
   process.standardInput = input == nil ? FileHandle.nullDevice : stdin
   process.standardOutput = outputs[0]
   process.standardError = outputs[1]
   for (pipe, buffer) in zip(outputs, buffers) {
     pipe.fileHandleForReading.readabilityHandler = { handle in
       let chunk = handle.availableData
-      if !chunk.isEmpty { buffer.append(chunk) }
+      if chunk.isEmpty {
+        handle.readabilityHandler = nil
+        buffer.finished.signal()
+      } else {
+        buffer.append(chunk)
+      }
     }
   }
   let exited = DispatchSemaphore(value: 0)
@@ -68,24 +122,31 @@ func runProcess(
       try? writer.close()
     }
   }
-  var isTimedOut = exited.wait(timeout: .now() + timeout) == .timedOut
-  if isTimedOut {
+  let deadline = Date().addingTimeInterval(timeout)
+  var isTimedOut = false
+  while exited.wait(timeout: .now() + 0.2) == .timedOut {
+    guard Cancellation.shared.isCancelled || Date() >= deadline else { continue }
+    isTimedOut = !Cancellation.shared.isCancelled
     process.terminate()
     if exited.wait(timeout: .now() + 3) == .timedOut {
+      forceStop?(process.processIdentifier)
       kill(process.processIdentifier, SIGKILL)
-      isTimedOut = exited.wait(timeout: .now() + 3) == .timedOut || isTimedOut
+      _ = exited.wait(timeout: .now() + 3)
     }
+    break
   }
-  Thread.sleep(forTimeInterval: 0.2)
-  for pipe in outputs {
-    pipe.fileHandleForReading.readabilityHandler = nil
-    try? pipe.fileHandleForReading.close()
+  var isDrained = true
+  for buffer in buffers where buffer.finished.wait(timeout: .now() + 2) == .timedOut {
+    isDrained = false
+  }
+  if !isDrained {
+    for pipe in outputs { pipe.fileHandleForReading.readabilityHandler = nil }
   }
   func text(_ buffer: OutputBuffer) -> (String, Bool) {
     let (data, isOverflowed) = buffer.snapshot
     let redacted = redactor.redact(String(decoding: data, as: UTF8.self)).text
     let bytes = Data(redacted.utf8)
-    guard bytes.count > outputLimit || isOverflowed else { return (redacted, false) }
+    guard bytes.count > outputLimit || isOverflowed || !isDrained else { return (redacted, false) }
     return (String(decoding: bytes.prefix(outputLimit), as: UTF8.self), true)
   }
   let (out, isOutTruncated) = text(buffers[0])
@@ -118,12 +179,28 @@ func notarize(_ arguments: [String], value: String, cwd: String?, redactor: Reda
 
 let securePath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
+func isRootProtected(_ path: String) -> Bool {
+  var current = path
+  while true {
+    var info = stat()
+    guard lstat(current, &info) == 0, info.st_uid == 0, info.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
+      return false
+    }
+    if current == "/" { return true }
+    current = (current as NSString).deletingLastPathComponent
+    if current.isEmpty { current = "/" }
+  }
+}
+
 func resolveProgram(_ program: String) throws -> String {
   if program.hasPrefix("/") {
-    guard FileManager.default.isExecutableFile(atPath: program) else {
-      throw CredentialError("invalid-arguments", "\(program) is not an executable file.")
+    let resolved = URL(fileURLWithPath: program).resolvingSymlinksInPath().path
+    guard FileManager.default.isExecutableFile(atPath: resolved), isRootProtected(resolved) else {
+      throw CredentialError(
+        "invalid-arguments",
+        "\(program) must be an executable that root owns, in directories that only root can change.")
     }
-    return program
+    return resolved
   }
   guard !program.contains("/"),
     let found = securePath.map({ $0 + "/" + program }).first(where: FileManager.default.isExecutableFile)
@@ -139,14 +216,28 @@ func runSudo(_ command: [String], value: String, cwd: String?, timeout: TimeInte
   throws -> ProcessResult
 {
   let validation = try runProcess(
-    "/usr/bin/sudo", ["-S", "-v", "-p", ""], input: Data((value + "\n").utf8), cwd: cwd, timeout: 30,
+    "/usr/bin/sudo", ["-S", "-v", "-p", ""], input: Data((value + "\n").utf8), cwd: cwd, timeout: 60,
     redactor: redactor)
+  guard !validation.isTimedOut else {
+    throw CredentialError("sudo-timeout", "sudo did not finish checking the password within 60 seconds.")
+  }
   guard validation.status == 0 else {
     throw CredentialError("sudo-refused", "sudo did not accept the password.")
   }
   defer { _ = try? runProcess("/usr/bin/sudo", ["-k"], input: nil, cwd: nil, timeout: 10, redactor: redactor) }
-  return try runProcess(
-    "/usr/bin/sudo", ["-n", "--"] + command, input: nil, cwd: cwd, timeout: timeout, redactor: redactor)
+  let result = try runProcess(
+    "/usr/bin/sudo", ["-n", "--"] + command, input: nil, cwd: cwd, timeout: timeout, redactor: redactor,
+    forceStop: { pid in
+      _ = try? runProcess(
+        "/usr/bin/sudo", ["-n", "/usr/bin/pkill", "-KILL", "-P", String(pid)], input: nil, cwd: nil,
+        timeout: 10, redactor: redactor)
+    })
+  if result.status != 0 && result.stderr.contains("a password is required") {
+    throw CredentialError(
+      "sudo-no-timestamp",
+      "sudo did not keep the approval between steps. Check timestamp_timeout in sudoers; it must be above 0.")
+  }
+  return result
 }
 
 func describeCommand(_ command: [String]) -> String {
@@ -166,14 +257,15 @@ func describeCommand(_ command: [String]) -> String {
   }.joined(separator: " ")
 }
 
-func isAppleSigned(_ pid: pid_t) -> Bool {
+func isAppleSigned(_ pid: pid_t, identifier: String) -> Bool {
   var code: SecCode?
   let attributes = [kSecGuestAttributePid: pid] as CFDictionary
   guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else {
     return false
   }
   var requirement: SecRequirement?
-  guard SecRequirementCreateWithString("anchor apple generic" as CFString, [], &requirement) == errSecSuccess
+  let text = "anchor apple generic and identifier \(identifier.debugDescription)"
+  guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess
   else { return false }
   return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
 }
@@ -189,7 +281,9 @@ func frontmostPid() -> pid_t? {
   return pid
 }
 
-func typeValue(_ value: String, into app: String, credential: Credential, isActivating: Bool, isReturnPressed: Bool)
+func typeValue(
+  _ value: String, name: String, into app: String, credential: Credential, isActivating: Bool, isReturnPressed: Bool
+)
   throws -> String
 {
   guard AXIsProcessTrusted() else {
@@ -208,20 +302,28 @@ func typeValue(_ value: String, into app: String, credential: Credential, isActi
     throw CredentialError("app-ambiguous", "\(matches.count) running apps match '\(app)'. Use a bundle identifier.")
   }
   let identity = target.bundleIdentifier ?? ""
-  let isAllowed =
-    credential.apps.isEmpty
-    || credential.apps.contains { $0.caseInsensitiveCompare(identity) == .orderedSame }
-  guard isAllowed else {
+  guard !credential.apps.isEmpty else {
+    throw CredentialError(
+      "apps-required", "Typing needs an allowed-apps list. Ask the user to run: /cred edit \(name) and set apps.")
+  }
+  guard credential.apps.contains(where: { $0.caseInsensitiveCompare(identity) == .orderedSame }) else {
     throw CredentialError(
       "app-not-allowed", "'\(identity)' is not in the allowed apps: \(credential.apps.joined(separator: ", ")).")
   }
-  guard isAppleSigned(target.processIdentifier) else {
+  guard isAppleSigned(target.processIdentifier, identifier: identity) else {
     throw CredentialError("app-unsigned", "'\(identity)' does not have a valid Apple-issued signature.")
   }
   if isActivating {
     target.activate()
     let deadline = Date().addingTimeInterval(3)
+    var isReopened = false
     while frontmostPid() != target.processIdentifier, Date() < deadline {
+      if !isReopened, Date() > deadline.addingTimeInterval(-2), let url = target.bundleURL {
+        isReopened = true
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+      }
       RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
   }
@@ -234,10 +336,13 @@ func typeValue(_ value: String, into app: String, credential: Credential, isActi
     event.postToPid(target.processIdentifier)
     usleep(8000)
   }
+  let digitKeys: [Character: CGKeyCode] = [
+    "0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25,
+  ]
   for character in value {
     let units = Array(String(character).utf16)
     for isDown in [true, false] {
-      let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: isDown)
+      let event = CGEvent(keyboardEventSource: source, virtualKey: digitKeys[character] ?? 0, keyDown: isDown)
       event?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
       try post(event)
     }
