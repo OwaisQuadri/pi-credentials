@@ -1,6 +1,6 @@
 # pi-credentials
 
-Status: design. Nothing is built yet.
+Status: the Swift helper is built. The Pi extension is next.
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
@@ -20,7 +20,7 @@ A Pi extension that lets agents **use** your credentials without **seeing** them
 
 ## Parts
 
-- **Swift helper.** A signed binary that alone reads Keychain items silently, stores the catalog and grants, and runs Touch ID.
+- **Swift helper.** A signed binary that reads registered Keychain items without a dialog, stores the catalog and grants, and asks for owner confirmation.
 - **Pi extension.** TypeScript. It provides the `/cred` command, the agent tools, and output redaction. It calls the helper and never caches values on disk.
 
 ## Catalog
@@ -33,12 +33,24 @@ Only credentials that you register appear. Each entry has:
 | description | `OpenRouter key for model calls and image generation` |
 | kind | `api-key`, `password`, `app-password`, or `passcode` |
 | Keychain item | The existing item's service name. The broker refers to it; it does not copy the value. |
-| allowed hosts | Optional, `api-key` only. Empty means any host. |
+| allowed hosts | Optional, `api-key` only. Empty means any host. `api.example.com` matches only that host; `*.example.com` matches it and every subdomain. |
 | allowed apps | Optional, for typing. Empty means any app. |
 | rotation link | Optional. The page where you replace this credential. |
 | grants | `global`, or one or more project groups |
 
-Registering a credential tightens the item's access list so that only the helper reads it without a prompt. macOS asks for your login password once per item. Other readers, such as `security find-generic-password -w`, get a visible macOS prompt.
+Registering a credential moves the item under the helper's ownership:
+
+1. The helper reads the existing item once. macOS shows a dialog, and you click Allow.
+2. The helper re-creates the item. Its access list then trusts only the helper, and its partition list holds only the helper's signing team.
+3. Other readers, including `security find-generic-password -w`, get a macOS dialog that you can deny.
+
+Items that you created with the `security` command trust `/usr/bin/security` and the `apple-tool:` partition. Any shell command can read those items silently until you register them.
+
+The helper never reads an item before you register it, because macOS cannot suppress the dialog for login-keychain items.
+
+The helper is signed with a Developer ID identity. Its designated requirement is its identifier and team, not a file hash, so a rebuilt helper keeps its access. A build with ad-hoc signing loses access after each rebuild.
+
+Registering copies the item's label, comment, description, and generic attributes. The new item is in the default keychain, even if the original was in another keychain.
 
 The agent reads the catalog with `cred_list`: names, descriptions, kinds, and actions for the current project. Never values.
 
@@ -75,8 +87,8 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 
 - Fuzzy Tab completion at each position, like `/model`: subcommand, then credential name with its description trimmed to the terminal width, then scope.
 - `/cred list` opens a scrollable picker: name, kind, description, grants, last use.
-- **Touch ID is required for add, edit, grant, revoke, and delete.** Use needs no prompt.
-- `/cred edit` changes metadata only: description, kind, hosts, apps. It never shows the value.
+- **Owner confirmation is required for add, edit, grant, revoke, and delete.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
+- `/cred edit` changes metadata only: description, kind, hosts, apps, and rotation link. It never shows the value.
 
 ## Input
 
@@ -101,7 +113,7 @@ In an interactive session, the agent offers the grant inline, and you confirm wi
 ## Visibility
 
 - The footer shows a marker, such as `🔑 openrouter`, while a credential is in use.
-- `~/.pi/agent/cred/usage.jsonl` records each use: time, credential, action, target, project group, session ID, and result. Never the value. Keep it out of Git.
+- `~/.pi/agent/cred/usage.jsonl` records each use and each refusal: time, credential, action, target, project groups, session ID, and result. Never the value. Keep it out of Git.
 
 ## Leak warnings
 
@@ -126,10 +138,10 @@ The broker scans saved chat history for credentials that leaked before redaction
 | Layer | Strength |
 |---|---|
 | Keychain access list on each registered item | Enforced by macOS |
-| Catalog and grants inside the helper's Keychain storage, changed only after Touch ID | Enforced by macOS |
+| Catalog and grants inside the helper's Keychain storage, changed only after Touch ID | Soft: a shell can replace the catalog item; see Limits |
 | Helper and extension installed where the scope guard blocks agent writes | Enforced by Pi hooks |
 | Command guard blocks `security -w`, `security -g`, `dump-keychain`, and `.env` reads | Soft: blocks direct routes only |
-| Redaction of every tool result: each registered value, plus its base64 and URL-encoded forms, becomes `[cred:name]` | Soft: backstop |
+| Redaction of every tool result: each registered `api-key` and `app-password` of 8 or more characters becomes `[cred:name]` | Soft: backstop |
 | Credentials removed from shell startup environment variables | Required for the boundary to mean anything |
 
 ## Limits
@@ -138,12 +150,47 @@ The broker scans saved chat history for credentials that leaked before redaction
 - A program that reads a `.env` file, or receives a variable, can print the value in a transformed form, such as reversed or split, that redaction misses.
 - A server that receives a key can log it.
 - `cred_sudo` gives root to each approved command. Root can bypass every layer above.
+- **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
+- **A shell can replace the catalog.** The helper re-creates the catalog item on each save, so only the helper can read the saved copy without a dialog. A process that deletes the item, or creates one before the first save, can still write its own grants and hosts. The command guard should block `security` calls that add or delete the `pi-credentials.catalog` service.
+- **Project scope is advisory against an agent that can run the helper.** The helper reads Git remotes from the directory it is given, and an agent can give it any directory. The command guard should block direct helper calls from the shell.
+- Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except ASCII `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes in any of those forms. Other encoders, partial values, and transformed values get through.
+- The helper refuses hosts, apps, group patterns, service names, accounts, descriptions, and rotation links with characters that could disguise a Touch ID prompt, and lists of more than 16 entries.
+- Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values. They can still reach output through a program that reads a `.env` file or through a `cred_type` target, and redaction does not catch them there.
+- `redact` and `request` list credentials that they could not read under `unavailable`. Output can still contain those values.
 
 ## Not included
 
 - Per-use Touch ID.
 - A general "run any command with credentials in its environment" action.
 - Credential stores other than macOS Keychain.
+
+## Helper
+
+Build and sign the helper:
+
+```zsh
+./scripts/build.zsh
+```
+
+The script signs with your Developer ID identity when one exists. Set `PI_CREDENTIALS_SIGNING_IDENTITY` to choose another identity.
+
+Each command reads one JSON object from standard input and writes one JSON object to standard output. An error is `{"error": {"code", "message"}}` with exit status 1.
+
+| Command | Input | Touch ID |
+|---|---|---|
+| `list` | `cwd` | No |
+| `register` | `name`, `service`, optional `account`, `kind`, `description`, `hosts`, `apps`, `rotation` | Yes |
+| `add` | `name`, `value`, `kind`, `description`, optional `service` and metadata | Yes |
+| `edit` | `name` and the metadata to change | Yes |
+| `grant`, `revoke` | `name`, `scope` | Yes |
+| `group` | `name`, `patterns`; empty patterns remove the group | Yes |
+| `delete` | `name`, optional `isValueDeleted` | Yes |
+| `request` | `name`, `cwd`, `session`, `request` | No |
+| `redact` | `text` | No |
+
+`request` accepts `method`, `url`, `headers`, `body`, `authHeader` (default `Authorization`), and `authPrefix` (default `Bearer `). It requires https, refuses redirects, uses no cache or cookie store, and redacts the response body and content type before it truncates the body to 1 MB.
+
+`cwd` is the project directory. The helper reads its Git remotes to find the project groups.
 
 ## License
 
