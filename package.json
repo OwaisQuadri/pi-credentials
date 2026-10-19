@@ -1,0 +1,41 @@
+{
+  "name": "pi-credentials",
+  "version": "0.1.0",
+  "description": "Pi extension: let agents use macOS Keychain credentials without seeing them.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "keychain",
+    "credentials",
+    "secrets"
+  ],
+  "pi": {
+    "extensions": [
+      "./extension/index.ts"
+    ]
+  },
+  "files": [
+    "extension",
+    "helper",
+    "scripts",
+    "Package.swift"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "postinstall": "zsh scripts/build.zsh",
+    "test": "node --test extension/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^6.0.3"
+  }
+}
