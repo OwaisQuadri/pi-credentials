@@ -4,6 +4,7 @@ import Foundation
 
 struct Input: Decodable {
   var name: String?
+  var sessionDir: String?
   var scope: String?
   var cwd: String?
   var service: String?
@@ -490,6 +491,7 @@ func run(_ command: String, _ input: Input) async throws {
     var lines: [(name: String, line: String)] = []
     var unavailable: [String] = []
     var skipped: [String] = []
+    var written: [String] = []
     for name in selected {
       let credential = try catalog.credential(name)
       let variable = credential.env ?? Credential.defaultEnvName(name)
@@ -505,13 +507,18 @@ func run(_ command: String, _ input: Input) async throws {
         continue
       }
       lines.append((variable, envLine(variable, value)))
+      written.append(name)
     }
     guard !lines.isEmpty else {
       throw CredentialError("no-credentials", "No granted api-key or app-password credential could be written.")
     }
     try Cancellation.shared.guarded { try mergeEnvFile(path, lines: lines) }
     let variables = lines.map(\.name)
-    logUse(input, groups: projectGroups, action: "env", target: path, result: variables.joined(separator: " "))
+    for (name, variable) in zip(written, variables) {
+      var entry = input
+      entry.name = name
+      logUse(entry, groups: projectGroups, action: "env", target: path, result: variable)
+    }
     struct Output: Encodable {
       var path: String
       var variables: [String]
@@ -521,7 +528,7 @@ func run(_ command: String, _ input: Input) async throws {
     emit(Output(path: path, variables: variables, unavailable: unavailable, skipped: skipped))
 
   case "scan":
-    let result = try scanSessions(catalog, isFull: input.isFull ?? false)
+    let result = try scanSessions(catalog, isFull: input.isFull ?? false, extraRoot: input.sessionDir)
     emit(report(result.state, catalog: catalog, scanned: result.scanned))
 
   case "rotated":
@@ -532,6 +539,11 @@ func run(_ command: String, _ input: Input) async throws {
         reason: "mark '\(name)' as rotated, which hides its leak warnings for sessions saved before now")
       credential.rotatedAt = now
       catalog.credentials[name] = credential
+      var dismissed = catalog.dismissed ?? [:]
+      for entry in loadScanState().files.values {
+        for (fingerprint, owner) in entry.findings.registered ?? [:] where owner == name { dismissed[fingerprint] = now }
+      }
+      catalog.dismissed = dismissed
     } else if LeakScanner.keyFormats.contains(where: { $0.prefix == name }) {
       let fingerprints = Set(
         loadScanState().files.values.flatMap { entry in
@@ -560,7 +572,7 @@ func run(_ command: String, _ input: Input) async throws {
     let state = loadScanState()
     let count = state.files.keys.filter { $0 != input.exclude }.count
     try Keychain.authenticateOwner(
-      reason: "rewrite \(count) saved session files, replacing leaked credential values with markers; sessions changed in the last 10 minutes are skipped")
+      reason: "rewrite \(count) saved session files, replacing leaked credential values with [cred-scrubbed:name] markers; sessions changed in the last 10 minutes are skipped")
     let result = try scrubSessions(catalog, excluding: input.exclude)
     struct Output: Encodable {
       var rewritten: Int

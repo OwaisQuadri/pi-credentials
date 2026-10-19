@@ -85,6 +85,6 @@ export function callHelper<T>(command: string, input: Record<string, unknown>, s
 export function describeListing(listing: Listing): string {
 	const hosts = listing.kind === "api-key" ? ` · ${listing.hosts.length ? listing.hosts.join(", ") : "any host"}` : "";
 	const scope = listing.grants.length ? listing.grants.join(", ") : "not granted";
-	const used = listing.lastUse ? ` · used ${listing.lastUse.slice(0, 10)}` : "";
+	const used = listing.lastUse ? ` · used ${new Date(listing.lastUse).toLocaleDateString("en-CA")}` : "";
 	return `${listing.kind}${hosts} · ${scope}${used} · ${listing.description}`;
 }

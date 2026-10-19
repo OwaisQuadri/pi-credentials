@@ -20,7 +20,7 @@ const subcommands: Record<string, string> = {
 	env: "Write a .env file with the credentials granted to this project",
 	scan: "Scan all saved sessions for leaked credentials",
 	rotated: "Mark a leaked credential as replaced",
-	scrub: "Rewrite leaked values in saved sessions to [cred:name]",
+	scrub: "Rewrite leaked values in saved sessions to [cred-scrubbed:name] markers",
 };
 
 interface EnvResult {
@@ -36,6 +36,10 @@ function describeEnv(result: EnvResult): string {
 		result.unavailable.length ? `Could not read: ${result.unavailable.join(", ")}.` : "",
 		result.skipped.length ? `Skipped (under 8 characters): ${result.skipped.join(", ")}.` : "",
 	].filter(Boolean).join(" ");
+}
+
+function sessionDirectory(ctx: ExtensionContext): { sessionDir?: string } {
+	return { sessionDir: ctx.sessionManager.getSessionDir() };
 }
 
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };
@@ -337,7 +341,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 		}
 		case "scan": {
 			ctx.ui.notify("Scanning saved sessions. This can take a few minutes.", "info");
-			const report = await callHelper<LeakReport>("scan", { isFull: true });
+			const report = await callHelper<LeakReport>("scan", { isFull: true, ...sessionDirectory(ctx) });
 			showLeaks(ctx, report);
 			return `Scanned ${report.scanned} files. ${report.leaks.length + report.unknown.length ? "See the warning above the editor." : "No leaked credentials found."}`;
 		}
@@ -346,7 +350,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			return `Marked ${name} as rotated.`;
 		}
 		case "scrub": {
-			if (!(await ctx.ui.confirm("Rewrite leaked values in saved sessions?", "Matches become [cred:name]. Sessions changed in the last 10 minutes are skipped."))) return undefined;
+			if (!(await ctx.ui.confirm("Rewrite leaked values in saved sessions?", "Matches become [cred-scrubbed:name] or [cred:unknown-…] markers. Sessions changed in the last 10 minutes are skipped."))) return undefined;
 			const result = await callHelper<{ rewritten: number; skipped: number; report: LeakReport }>("scrub", { exclude: ctx.sessionManager.getSessionFile() });
 			showLeaks(ctx, result.report);
 			return `Rewrote ${result.rewritten} files.${result.skipped ? ` Skipped ${result.skipped} recently active files; run /cred scrub again later.` : ""}`;
@@ -379,7 +383,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
 			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
-			void callHelper<LeakReport>("scan", {}).then((report) => showLeaks(ctx, report)).catch(() => undefined);
+			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => showLeaks(ctx, report)).catch(() => undefined);
 		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
 	});
 

@@ -5,6 +5,7 @@ import Foundation
 public struct LeakFindings: Codable, Equatable, Sendable {
   public var names: [String] = []
   public var unknown: [String: String] = [:]
+  public var registered: [String: String]? = nil
 
   public var isEmpty: Bool { names.isEmpty && unknown.isEmpty }
 }
@@ -41,14 +42,22 @@ public struct LeakScanner: Sendable {
       || byte == 95
   }
 
-  static let placeholderMarks = [
-    "xxxx", "0000", "1234", "abcd", "example", "your", "test", "dummy", "fake", "placeholder",
-    "redacted", "sample", "here",
-  ]
+  static let placeholderWords = ["example", "placeholder", "redacted", "dummy"]
+  static let placeholderMarks = ["xxxx", "0000", "1234", "abcd", "your", "test", "fake", "sample", "here"]
 
   static func isPlaceholder(_ token: String, prefix: String) -> Bool {
     let body = token.dropFirst(prefix.count).lowercased()
-    return Set(body).count < 12 || placeholderMarks.contains { body.contains($0) }
+    guard Set(body).count >= 12, !placeholderWords.contains(where: { body.contains($0) }) else { return true }
+    let segments = body.split(whereSeparator: { $0 == "-" || $0 == "_" })
+    return segments.contains { segment in
+      segment.count <= 16 && placeholderMarks.contains { segment.contains($0) }
+    }
+  }
+
+  static func isBoundary(_ buffer: UnsafeRawBufferPointer, before start: Int) -> Bool {
+    guard start > 0, isTokenByte(buffer[start - 1]) else { return true }
+    let isEscape = [UInt8(ascii: "n"), UInt8(ascii: "r"), UInt8(ascii: "t")].contains(buffer[start - 1])
+    return isEscape && start > 1 && buffer[start - 2] == UInt8(ascii: "\\")
   }
 
   public static func fingerprint(_ token: String) -> String {
@@ -74,16 +83,17 @@ public struct LeakScanner: Sendable {
   func tokens(in data: Data) -> [(token: String, prefix: String)] {
     data.withUnsafeBytes { buffer in
       var seen: [(range: Range<Int>, token: String, prefix: String)] = []
+      var covered = IndexSet()
       for format in Self.keyFormats {
-        for start in Self.occurrences(of: Array(format.prefix.utf8), in: buffer)
-        where !seen.contains(where: { $0.range.contains(start) }) {
-          if start > 0 && Self.isTokenByte(buffer[start - 1]) { continue }
+        for start in Self.occurrences(of: Array(format.prefix.utf8), in: buffer) where !covered.contains(start) {
+          guard Self.isBoundary(buffer, before: start) else { continue }
           var end = start + format.prefix.utf8.count
           while end < buffer.count && Self.isTokenByte(buffer[end]) { end += 1 }
           guard end - start >= format.minimumLength, end - start <= 256 else { continue }
           let token = String(decoding: buffer[start..<end], as: UTF8.self)
           guard !Self.isPlaceholder(token, prefix: format.prefix) else { continue }
           seen.append((start..<end, token, format.prefix))
+          covered.insert(integersIn: start..<end)
         }
       }
       return seen.sorted { $0.range.lowerBound < $1.range.lowerBound }.map { ($0.token, $0.prefix) }
@@ -132,11 +142,15 @@ public struct LeakScanner: Sendable {
       }
     }
     for (token, prefix) in tokens(in: data) {
-      let isRegistered = needles.contains { needle in
+      let owner = needles.first { needle in
         let text = String(decoding: needle.bytes, as: UTF8.self)
         return token.contains(text) || text.contains(token)
       }
-      if !isRegistered { findings.unknown[Self.fingerprint(token)] = prefix }
+      if let owner {
+        findings.registered = (findings.registered ?? [:]).merging([Self.fingerprint(token): owner.name]) { _, new in new }
+      } else {
+        findings.unknown[Self.fingerprint(token)] = prefix
+      }
     }
     findings.names.sort()
     return findings
@@ -144,7 +158,8 @@ public struct LeakScanner: Sendable {
 
   public func scrub(_ data: Data) -> Data {
     var text = redactor.redact(String(decoding: data, as: UTF8.self), labelPrefix: "cred-scrubbed").text
-    for (token, prefix) in tokens(in: Data(text.utf8)) {
+    var replaced = Set<String>()
+    for (token, prefix) in tokens(in: Data(text.utf8)) where replaced.insert(token).inserted {
       text = text.replacingOccurrences(of: token, with: "[cred:unknown-\(prefix)\(Self.fingerprint(token))]")
     }
     return Data(text.utf8)

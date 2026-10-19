@@ -4,11 +4,30 @@ import Foundation
 struct ScanEntry: Codable {
   var mtime: Double
   var findings: LeakFindings
+  var firstSeen: [String: Double]?
+
+  static func keys(_ findings: LeakFindings) -> [String] {
+    findings.names.map { "name:" + $0 } + findings.unknown.keys.map { "key:" + $0 }
+  }
+
+  init(mtime: Double, findings: LeakFindings, previous: ScanEntry?) {
+    self.mtime = mtime
+    self.findings = findings
+    let earlier = previous.map { Set(Self.keys($0.findings)) } ?? []
+    var seen: [String: Double] = [:]
+    for key in Self.keys(findings) {
+      seen[key] = previous?.firstSeen?[key] ?? (earlier.contains(key) ? previous?.mtime : nil) ?? mtime
+    }
+    firstSeen = seen
+  }
+
+  func seen(_ key: String) -> Double { firstSeen?[key] ?? mtime }
 }
 
 struct ScanState: Codable {
   var lastScan: Double?
   var files: [String: ScanEntry] = [:]
+  var roots: [String]?
 }
 
 struct LeakReport: Encodable {
@@ -29,9 +48,12 @@ struct LeakReport: Encodable {
   var scanned: Int
 }
 
+func standardPath(_ path: String) -> String { (path as NSString).standardizingPath }
+
 func sessionsRoot() -> String {
-  (ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"] ?? NSHomeDirectory() + "/.pi/agent")
-    + "/sessions"
+  standardPath(
+    (ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"] ?? NSHomeDirectory() + "/.pi/agent")
+      + "/sessions")
 }
 
 func scanStatePath() -> String { credDirectory() + "/scan.json" }
@@ -56,30 +78,52 @@ func modificationTime(_ path: String) -> Double? {
   return Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9
 }
 
+struct FileIdentity: Equatable {
+  var size: off_t
+  var seconds: Int
+  var nanoseconds: Int
+  var inode: ino_t
+
+  var mtime: Double { Double(seconds) + Double(nanoseconds) / 1e9 }
+}
+
+func fileIdentity(_ path: String) -> FileIdentity? {
+  var info = stat()
+  guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+  return FileIdentity(
+    size: info.st_size, seconds: info.st_mtimespec.tv_sec, nanoseconds: info.st_mtimespec.tv_nsec,
+    inode: info.st_ino)
+}
+
 func scannerFor(_ catalog: Catalog) -> LeakScanner {
   LeakScanner(redactor: Redactor(values: redactionValues(catalog).values))
 }
 
-func scanSessions(_ catalog: Catalog, isFull: Bool) throws -> (state: ScanState, scanned: Int) {
+func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -> (state: ScanState, scanned: Int) {
   var state = loadScanState()
   let scanner = scannerFor(catalog)
   let started = Date().timeIntervalSince1970
   let since = isFull ? nil : state.lastScan
-  let root = sessionsRoot()
+  var roots = [sessionsRoot()] + (state.roots ?? [])
+  if let extraRoot, !roots.contains(where: { standardPath(extraRoot) == $0 || standardPath(extraRoot).hasPrefix($0 + "/") }) {
+    roots.append(standardPath(extraRoot))
+    state.roots = (state.roots ?? []) + [standardPath(extraRoot)]
+  }
   var scanned = 0
   var present = Set<String>()
-  let enumerator = FileManager.default.enumerator(atPath: root)
-  while let relative = enumerator?.nextObject() as? String {
-    let path = root + "/" + relative
-    guard let mtime = modificationTime(path) else { continue }
-    present.insert(path)
-    if let since, mtime < since { continue }
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else {
-      continue
+  for root in roots {
+    let enumerator = FileManager.default.enumerator(atPath: root)
+    while let relative = enumerator?.nextObject() as? String {
+      let path = root + "/" + relative
+      guard !present.contains(path), let mtime = modificationTime(path) else { continue }
+      present.insert(path)
+      if let since, mtime < since { continue }
+      guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { continue }
+      scanned += 1
+      let findings = scanner.scan(data)
+      state.files[path] =
+        findings.isEmpty ? nil : ScanEntry(mtime: mtime, findings: findings, previous: state.files[path])
     }
-    scanned += 1
-    let findings = scanner.scan(data)
-    state.files[path] = findings.isEmpty ? nil : ScanEntry(mtime: mtime, findings: findings)
   }
   state.files = state.files.filter { present.contains($0.key) }
   state.lastScan = started
@@ -90,16 +134,17 @@ func scanSessions(_ catalog: Catalog, isFull: Bool) throws -> (state: ScanState,
 func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
   let formatter = ISO8601DateFormatter()
   formatter.formatOptions = [.withFullDate]
+  formatter.timeZone = .current
   var known: [String: (count: Int, last: Double)] = [:]
   var unknown: [String: (prefix: String, count: Int, last: Double)] = [:]
   for entry in state.files.values {
     for name in entry.findings.names where catalog.credentials[name] != nil {
-      if let rotated = catalog.credentials[name]?.rotatedAt, entry.mtime < rotated { continue }
+      if let rotated = catalog.credentials[name]?.rotatedAt, entry.seen("name:" + name) < rotated { continue }
       let current = known[name] ?? (0, 0)
       known[name] = (current.count + 1, max(current.last, entry.mtime))
     }
     for (fingerprint, prefix) in entry.findings.unknown {
-      if let dismissed = catalog.dismissed?[fingerprint], entry.mtime < dismissed { continue }
+      if let dismissed = catalog.dismissed?[fingerprint], entry.seen("key:" + fingerprint) < dismissed { continue }
       let current = unknown[fingerprint] ?? (prefix, 0, 0)
       unknown[fingerprint] = (prefix, current.count + 1, max(current.last, entry.mtime))
     }
@@ -126,8 +171,9 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
   var rewritten = 0
   var skipped = 0
   let cutoff = Date().timeIntervalSince1970 - activeWindow
-  for (path, _) in state.files where path != excluded {
-    guard let mtime = modificationTime(path), mtime < cutoff else {
+  let excludedPath = excluded.map(standardPath)
+  for (path, _) in state.files where path != excludedPath {
+    guard let before = fileIdentity(path), before.mtime < cutoff else {
       skipped += 1
       continue
     }
@@ -143,6 +189,11 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
       if let modified = attributes[.modificationDate] {
         try? FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: temporary)
       }
+      guard fileIdentity(path) == before else {
+        unlink(temporary)
+        skipped += 1
+        continue
+      }
       guard rename(temporary, path) == 0 else {
         unlink(temporary)
         throw CredentialError("scrub-failed", "Could not rewrite \(path).")
@@ -152,7 +203,9 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
     let findings = modificationTime(path).map { mtime in
       (mtime, scanner.scan(FileManager.default.contents(atPath: path) ?? Data()))
     }
-    state.files[path] = findings.flatMap { $0.1.isEmpty ? nil : ScanEntry(mtime: $0.0, findings: $0.1) }
+    state.files[path] = findings.flatMap {
+      $0.1.isEmpty ? nil : ScanEntry(mtime: $0.0, findings: $0.1, previous: state.files[path])
+    }
   }
   try saveScanState(state)
   return (rewritten, skipped)

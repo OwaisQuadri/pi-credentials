@@ -88,7 +88,7 @@ let catalog = Catalog(
 }
 
 @Test func leakScanFindsRegisteredAndUnknownKeysOnly() {
-  let registered = "sk-or-v1-" + String(repeating: "a1", count: 32)
+  let registered = "sk-or-v1-Zq8Wm3Rt7Yp2Lk5Hn9Bv4Cx6Dj1Fg0Ss8Ee3Aa7Uu2Ii5Oo9"
   let unknown = "lin_api_Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUi"
   let scanner = LeakScanner(redactor: Redactor(values: [("router", registered)]))
   let encoded = Data(registered.utf8).base64EncodedString()
@@ -96,9 +96,11 @@ let catalog = Catalog(
   let findings = scanner.scan(Data(text.utf8))
   #expect(findings.names == ["router"])
   #expect(findings.unknown == [LeakScanner.fingerprint(unknown): "lin_api_"])
+  #expect(findings.registered == [LeakScanner.fingerprint(registered): "router"])
   let scrubbed = String(decoding: scanner.scrub(Data(text.utf8)), as: UTF8.self)
   #expect(!scrubbed.contains(registered) && !scrubbed.contains(encoded) && !scrubbed.contains(unknown))
-  #expect(scanner.scan(Data(scrubbed.utf8)) == findings)
+  let rescanned = scanner.scan(Data(scrubbed.utf8))
+  #expect(rescanned.names == findings.names && rescanned.unknown == findings.unknown)
   #expect(scanner.scan(Data("no keys here: sk-short".utf8)).isEmpty)
 }
 
@@ -107,4 +109,17 @@ let catalog = Catalog(
   for text in ["sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sk-proj-your-key-goes-here-1234567890abcdefgh", "ghp_" + String(repeating: "A", count: 36)] {
     #expect(scanner.scan(Data(text.utf8)).isEmpty, "\(text)")
   }
+  let real = "sk-ant-api03-Q7mZr2Kp9Lw4testVx8Nb3Jt6Hc1Fd5Gs0YeUiR4oP"
+  #expect(scanner.scan(Data(real.utf8)).unknown == [LeakScanner.fingerprint(real): "sk-ant-"])
+}
+
+@Test func leakScanFindsKeysAfterEscapedLineBreaks() {
+  let scanner = LeakScanner(redactor: Redactor(values: []))
+  let key = "sk-ant-api03-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUiR4oP"
+  for escape in ["\\n", "\\r", "\\t"] {
+    let text = "{\"text\":\"key:\(escape)\(key)\"}"
+    #expect(scanner.scan(Data(text.utf8)).unknown == [LeakScanner.fingerprint(key): "sk-ant-"], "\(escape)")
+    #expect(!String(decoding: scanner.scrub(Data(text.utf8)), as: UTF8.self).contains(key))
+  }
+  #expect(scanner.scan(Data("{\"text\":\"plainsk-ant-api03-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5\"}".utf8)).isEmpty)
 }
