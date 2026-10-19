@@ -70,7 +70,7 @@ public struct Catalog: Codable, Equatable, Sendable {
     }
     for item in items {
       let isValid =
-        item.count <= length && item.range(of: "^" + pattern + "$", options: .regularExpression) != nil
+        item.count <= length && item.range(of: "\\A(?:" + pattern + ")\\z", options: .regularExpression) != nil
       guard isValid else {
         throw CredentialError("invalid-\(field)", "'\(item.prefix(64))' is not a valid entry for \(field).")
       }
@@ -90,7 +90,9 @@ public struct Catalog: Codable, Equatable, Sendable {
   }
 
   public static func validatePlain(_ text: String, field: String) throws {
-    guard text.count <= 256, !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    guard text.count <= 256, !text.unicodeScalars.contains(where: {
+        CharacterSet.controlCharacters.union(.newlines).contains($0)
+      })
     else {
       throw CredentialError("invalid-\(field)", "Use up to 256 characters without control characters for \(field).")
     }

@@ -113,7 +113,10 @@ func applyMetadata(_ input: Input, to credential: inout Credential) throws {
   }
   if let rotation = input.rotation {
     try Catalog.validatePlain(rotation, field: "rotation")
-    guard rotation.isEmpty || rotation.hasPrefix("https://") else {
+    let isLink =
+      rotation.hasPrefix("https://") && URL(string: rotation)?.host != nil
+      && !rotation.contains(where: \.isWhitespace)
+    guard rotation.isEmpty || isLink else {
       throw CredentialError("invalid-rotation", "Use an https link for rotation.")
     }
     credential.rotation = rotation.isEmpty ? nil : rotation
@@ -157,7 +160,6 @@ func run(_ command: String, _ input: Input) async throws {
     if command == "register" {
       let service = try required(input.service, "service")
       try Catalog.validatePlain(service, field: "service")
-      if let account = input.account { try Catalog.validatePlain(account, field: "account") }
       let account: String
       do {
         account = try Keychain.resolveAccount(service: service, account: input.account)
@@ -165,6 +167,7 @@ func run(_ command: String, _ input: Input) async throws {
         account = try Keychain.resolveAccount(
           service: Keychain.stagingPrefix + service, account: input.account)
       }
+      try Catalog.validatePlain(account, field: "account")
       try Keychain.authenticateOwner(
         reason: "take over Keychain item '\(service)' (account '\(account)') as '\(name)': \(summary(credential))")
       try Keychain.adopt(service: service, account: account)
@@ -198,7 +201,9 @@ func run(_ command: String, _ input: Input) async throws {
     if before.apps != credential.apps {
       changes.append("apps [\(before.apps.joined(separator: ", "))] → [\(credential.apps.joined(separator: ", "))]")
     }
-    if before.description != credential.description { changes.append("description") }
+    if before.description != credential.description {
+      changes.append("description → \(credential.description)")
+    }
     if before.rotation != credential.rotation {
       changes.append("rotation link → \(credential.rotation ?? "none")")
     }

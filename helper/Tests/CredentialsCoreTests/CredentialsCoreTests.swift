@@ -55,13 +55,14 @@ let catalog = Catalog(
   for hosts in [["api.example.com", "*.example.org"]] {
     #expect((try? Catalog.validateHosts(hosts)) != nil)
   }
-  for hosts in [["a] → [b"], ["x.example\nevil"], ["*evil"], Array(repeating: "a.example", count: 17)] {
+  for hosts in [["a] → [b"], ["x.example\nevil"], ["a.example\n"], ["*evil"], Array(repeating: "a.example", count: 17)] {
     #expect((try? Catalog.validateHosts(hosts)) == nil)
   }
   #expect((try? Catalog.validatePatterns(["github.com/org/*"])) != nil)
   #expect((try? Catalog.validatePatterns(["github.com/org/*; granted: none"])) == nil)
   #expect((try? Catalog.validatePlain("ok", field: "service")) != nil)
   #expect((try? Catalog.validatePlain("a\nb", field: "service")) == nil)
+  #expect((try? Catalog.validatePlain("a\u{2028}b", field: "service")) == nil)
 }
 
 @Test func redactionCoversPlainAndEncodedForms() {
