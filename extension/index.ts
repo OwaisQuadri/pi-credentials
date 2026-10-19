@@ -7,7 +7,7 @@ const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
 	add: "Store a new credential value",
 	register: "Take over an existing Keychain item",
-	edit: "Change a credential's description, kind, hosts, or apps",
+	edit: "Change a credential's description, kind, hosts, apps, or rotation link",
 	grant: "Let agents use a credential globally or in a project group",
 	revoke: "Remove a grant",
 	group: "Set or remove a project group's Git remote patterns",
