@@ -125,7 +125,9 @@ func applyMetadata(_ input: Input, to credential: inout Credential) throws {
 
 func summary(_ credential: Credential) -> String {
   let hosts = credential.hosts.isEmpty ? "any host" : credential.hosts.joined(separator: ", ")
-  return "\(credential.kind.rawValue), \(credential.kind == .apiKey ? hosts : "no hosts")"
+  let rotation = credential.rotation.map { "; rotation link \($0)" } ?? ""
+  return "\(credential.kind.rawValue), \(credential.kind == .apiKey ? hosts : "no hosts"); "
+    + "\"\(credential.description)\"\(rotation)"
 }
 
 func run(_ command: String, _ input: Input) async throws {

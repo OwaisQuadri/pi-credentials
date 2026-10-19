@@ -90,7 +90,7 @@ public struct Catalog: Codable, Equatable, Sendable {
   }
 
   public static func validatePlain(_ text: String, field: String) throws {
-    guard text.count <= 256, !text.unicodeScalars.contains(where: {
+    guard text.unicodeScalars.count <= 256, !text.unicodeScalars.contains(where: {
         CharacterSet.controlCharacters.union(.newlines).contains($0)
       })
     else {

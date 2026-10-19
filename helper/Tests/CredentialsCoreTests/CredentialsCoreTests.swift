@@ -63,6 +63,8 @@ let catalog = Catalog(
   #expect((try? Catalog.validatePlain("ok", field: "service")) != nil)
   #expect((try? Catalog.validatePlain("a\nb", field: "service")) == nil)
   #expect((try? Catalog.validatePlain("a\u{2028}b", field: "service")) == nil)
+  #expect(
+    (try? Catalog.validatePlain("a" + String(repeating: "\u{0301}", count: 300), field: "service")) == nil)
 }
 
 @Test func redactionCoversPlainAndEncodedForms() {
