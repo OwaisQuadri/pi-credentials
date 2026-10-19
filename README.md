@@ -35,6 +35,7 @@ Only credentials that you register appear. Each entry has:
 | Keychain item | The existing item's service name. The broker refers to it; it does not copy the value. |
 | allowed hosts | Optional, `api-key` only. Empty means any host. |
 | allowed apps | Optional, for typing. Empty means any app. |
+| rotation link | Optional. The page where you replace this credential. |
 | grants | `global`, or one or more project groups |
 
 Registering a credential tightens the item's access list so that only the helper reads it without a prompt. macOS asks for your login password once per item. Other readers, such as `security find-generic-password -w`, get a visible macOS prompt.
@@ -69,7 +70,7 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 ## Commands
 
 ```
-/cred add | edit | grant | revoke | delete | list
+/cred add | edit | grant | revoke | delete | list | scan | rotated | scrub
 ```
 
 - Fuzzy Tab completion at each position, like `/model`: subcommand, then credential name with its description trimmed to the terminal width, then scope.
@@ -101,6 +102,24 @@ In an interactive session, the agent offers the grant inline, and you confirm wi
 
 - The footer shows a marker, such as `🔑 openrouter`, while a credential is in use.
 - `~/.pi/agent/cred/usage.jsonl` records each use: time, credential, action, target, project group, session ID, and result. Never the value. Keep it out of Git.
+
+## Leak warnings
+
+The broker scans saved chat history for credentials that leaked before redaction caught them, or that never passed through the broker.
+
+- **What it finds.** Registered values, including their base64 and URL-encoded forms, and well-known key formats, such as `sk-`, `sk-or-`, `lin_api_`, and `ghp_`. A match on a key format that is not registered offers to register the key, so it gets a name and a rotation link.
+- **When it runs.** At Pi startup, on sessions saved since the last scan. `/cred scan` scans the full history.
+- **How it warns.** Like Pi's notice for a Model Context Protocol server that needs a login, a warning stays visible until you resolve it:
+
+```
+⚠ 2 credentials leaked in chat history. Rotate them:
+  openrouter  3 sessions, last 2026-10-12  → <rotation link>
+  unknown sk-…  1 session, 2026-10-03      → /cred add to name it
+```
+
+- **How you resolve it.** `/cred rotated <name>` marks the credential as replaced. The old value can stay in transcripts, because it no longer works.
+- **Optional cleanup.** `/cred scrub` rewrites the matches in saved transcripts to `[cred:name]`. It requires Touch ID, because it changes your history.
+- The warning and the scan never show the value. They show the credential name, or the key format's prefix only.
 
 ## Protection layers
 
