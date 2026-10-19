@@ -143,7 +143,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			} else {
 				const current = field === "hosts" ? listing.hosts.join(", ") : field === "apps" ? listing.apps.join(", ") : field === "description" ? listing.description : listing.rotation ?? "";
 				const text = await ctx.ui.input(`New ${field} (now: ${current || "none"})`, field === "hosts" || field === "apps" ? "comma separated, empty means any" : "");
-				if (text === undefined) return undefined;
+				if (text === undefined || (field === "description" && !text.trim())) return undefined;
 				const list = text.split(",").map((item) => item.trim()).filter(Boolean);
 				if (field === "hosts") change.hosts = list;
 				else if (field === "apps") change.apps = list;
