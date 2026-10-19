@@ -1,10 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { callHelper, describeListing, HelperError, kinds, type Catalog, type Kind } from "./helper.ts";
@@ -51,52 +50,75 @@ function realPath(path: string): string {
 	catch { return path; }
 }
 
+const unicodeSpaces = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
 export function resolvePiPath(input: string, cwd: string): string | undefined {
-	let text = input.trim();
+	let text = input.replace(unicodeSpaces, " ");
 	if (text.startsWith("@")) text = text.slice(1);
 	if (text === "~") text = homedir();
 	else if (text.startsWith("~/")) text = join(homedir(), text.slice(2));
-	if (/^file:\/\//i.test(text)) {
+	if (/^file:\/\//.test(text)) {
 		try { text = fileURLToPath(text); }
 		catch { return undefined; }
 	}
 	return isAbsolute(text) ? resolve(text) : resolve(cwd, text);
 }
 
-export function isProtectedPath(input: string, cwd: string): boolean {
+function isProtectedFile(input: string, cwd: string, agent: string): boolean {
 	const resolved = resolvePiPath(input, cwd);
 	if (resolved === undefined) return true;
 	const full = realPath(resolved).toLowerCase();
 	const base = basename(full);
 	if (base === ".env" || (base.startsWith(".env.") && !templateSuffixes.some((suffix) => base.endsWith(suffix)))) return true;
-	const agent = agentDirectory();
 	return ["auth.json", "mcp-auth.json"].some((name) => full === join(agent, name));
 }
 
-function agentDirectory(): string {
-	return realPath(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")).toLowerCase();
+export function isProtectedPath(input: string, cwd: string): boolean {
+	const agent = agentDirectory();
+	return [input, input.trim(), input.trim().replace(/^file:\/\//i, "file://")].some((form) => isProtectedFile(form, cwd, agent));
 }
 
-export function isGrepProtected(path: string | undefined, glob: string | undefined, cwd: string, timeoutMs = 10_000): Promise<boolean> {
+function agentDirectory(): string {
+	return realPath(getAgentDir()).toLowerCase();
+}
+
+function ripgrepPath(): string {
+	const bundled = join(getAgentDir(), "bin", "rg");
+	return existsSync(bundled) ? bundled : "rg";
+}
+
+const grepProtectedMessage = "pi-credentials refused this grep: it would search a .env file or a Pi auth file. Narrow the path or glob.";
+
+export function grepRefusal(path: string | undefined, glob: string | undefined, cwd: string, timeoutMs = 10_000): Promise<string | undefined> {
 	const root = resolvePiPath(path ?? ".", cwd);
-	if (root === undefined) return Promise.resolve(true);
-	const args = ["--files", "--hidden", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
+	if (root === undefined) return Promise.resolve("pi-credentials could not read this path.");
+	if (path !== undefined && isProtectedPath(path, cwd)) return Promise.resolve(grepProtectedMessage);
+	const agent = agentDirectory();
+	const args = ["--files", "--hidden", "--no-config", "--null", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
 	return new Promise((done) => {
 		let isSettled = false;
-		const finish = (isProtected: boolean) => {
+		let pending = "";
+		const finish = (reason: string | undefined) => {
 			if (isSettled) return;
 			isSettled = true;
 			clearTimeout(timer);
 			child.kill("SIGKILL");
-			done(isProtected);
+			done(reason);
 		};
-		const child = spawn("rg", args, { stdio: ["ignore", "pipe", "ignore"] });
-		const timer = setTimeout(() => finish(true), timeoutMs);
-		createInterface({ input: child.stdout }).on("line", (line) => {
-			if (isProtectedPath(line, cwd)) finish(true);
+		const child = spawn(ripgrepPath(), args, { stdio: ["ignore", "pipe", "ignore"] });
+		const timer = setTimeout(() => finish("pi-credentials could not list the files that this grep would search within 10 seconds. Narrow the path or glob."), timeoutMs);
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			const parts = (pending + chunk).split("\0");
+			pending = parts.pop() ?? "";
+			if (parts.some((file) => isProtectedFile(file, cwd, agent))) finish(grepProtectedMessage);
 		});
-		child.on("error", () => finish(true));
-		child.on("close", (code) => finish(code !== 0 && code !== 1));
+		child.on("error", () => finish("pi-credentials could not run ripgrep to check this grep."));
+		child.on("close", (code) => {
+			if (pending && isProtectedFile(pending, cwd, agent)) finish(grepProtectedMessage);
+			else if (code === 0 || code === 1) finish(undefined);
+			else finish("ripgrep could not list this path. It may be missing or unreadable.");
+		});
 	});
 }
 
@@ -129,7 +151,8 @@ async function withActive<T>(name: string, ctx: ExtensionContext, run: () => Pro
 }
 
 function describeProcess(result: ProcessResult): string {
-	const notes = [result.isTimedOut ? "Timed out and stopped." : "", result.isTruncated ? "Output truncated at 1 MB." : ""].filter(Boolean);
+	const stopNote = result.status === -1 ? "Could not stop the command. It may still be running, as root for cred_sudo." : result.isTimedOut ? "Timed out and stopped." : "";
+	const notes = [stopNote, result.isTruncated ? "Output truncated at 1 MB." : ""].filter(Boolean);
 	return [`Exit status ${result.status}`, ...notes, result.stdout && `stdout:\n${result.stdout}`, result.stderr && `stderr:\n${result.stderr}`].filter(Boolean).join("\n");
 }
 
@@ -330,9 +353,12 @@ export default function piCredentials(pi: ExtensionAPI) {
 		const input = event.input as { path?: unknown; glob?: unknown };
 		const path = typeof input.path === "string" ? input.path : undefined;
 		const glob = event.toolName === "grep" && typeof input.glob === "string" ? input.glob : undefined;
-		const isProtected = event.toolName === "grep" ? await isGrepProtected(path, glob, ctx.cwd) : path !== undefined && isProtectedPath(path, ctx.cwd);
-		if (!isProtected) return undefined;
-		return { block: true, reason: event.toolName === "grep" ? "pi-credentials refused this grep: it could search a .env file or a Pi auth file, or the file list took over 10 seconds. Narrow the path or glob. Use cred_list and the cred tools for credentials." : "pi-credentials protects .env and Pi auth files. Use cred_list and the cred tools, or cred_env to write a .env file." };
+		if (event.toolName === "grep") {
+			const reason = await grepRefusal(path, glob, ctx.cwd);
+			return reason === undefined ? undefined : { block: true, reason: `${reason} Use cred_list and the cred tools for credentials.` };
+		}
+		if (path === undefined || !isProtectedPath(path, ctx.cwd)) return undefined;
+		return { block: true, reason: "pi-credentials protects .env and Pi auth files. Use cred_list and the cred tools, or cred_env to write a .env file." };
 	});
 
 	async function useCredential<T>(name: string, ctx: ExtensionContext, usableKinds: Kind[], signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {

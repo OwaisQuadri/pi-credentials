@@ -50,7 +50,8 @@ final class Cancellation: @unchecked Sendable {
 }
 
 func installCancellation() -> [DispatchSourceSignal] {
-  [SIGTERM, SIGINT, SIGHUP].map { number in
+  signal(SIGPIPE) { _ in }
+  return [SIGTERM, SIGINT, SIGHUP].map { number in
     signal(number) { _ in }
     let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
     source.setEventHandler { Cancellation.shared.cancel() }
@@ -121,7 +122,7 @@ func runProcess(
   if let input {
     let writer = stdin.fileHandleForWriting
     DispatchQueue.global().async {
-      writer.write(input)
+      try? writer.write(contentsOf: input)
       try? writer.close()
     }
   }
@@ -244,6 +245,10 @@ func processTree(_ root: pid_t, redactor: Redactor) -> [pid_t] {
 func runSudo(_ command: [String], value: String, cwd: String?, timeout: TimeInterval, redactor: Redactor)
   throws -> ProcessResult
 {
+  defer {
+    _ = try? runProcess(
+      "/usr/bin/sudo", ["-k"], input: nil, cwd: nil, timeout: 10, redactor: redactor, isCancellable: false)
+  }
   let validation = try runProcess(
     "/usr/bin/sudo", ["-S", "-v", "-p", ""], input: Data((value + "\n").utf8), cwd: cwd, timeout: 60,
     redactor: redactor)
@@ -256,14 +261,12 @@ func runSudo(_ command: [String], value: String, cwd: String?, timeout: TimeInte
   guard validation.status == 0 else {
     throw CredentialError("sudo-refused", "sudo did not accept the password.")
   }
-  defer {
-    _ = try? runProcess(
-      "/usr/bin/sudo", ["-k"], input: nil, cwd: nil, timeout: 10, redactor: redactor, isCancellable: false)
-  }
   let result = try runProcess(
     "/usr/bin/sudo", ["-n", "--"] + command, input: nil, cwd: cwd, timeout: timeout, redactor: redactor,
     stop: { pid, number in
-      let targets = processTree(pid, redactor: redactor).map(String.init)
+      let tree = processTree(pid, redactor: redactor)
+      for target in tree { kill(target, number) }
+      let targets = tree.map(String.init)
       _ = try? runProcess(
         "/usr/bin/sudo", ["-S", "-p", "", "--", "/bin/kill", "-\(number)"] + targets,
         input: Data((value + "\n").utf8), cwd: nil, timeout: 30, redactor: redactor, isCancellable: false)

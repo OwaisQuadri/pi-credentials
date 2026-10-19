@@ -58,6 +58,10 @@ test("credential variables leave the Pi process and protected files stay unread"
 	assert.equal((await grep({}))?.block, true);
 	for (const glob of ["*.ts", "*.md", ".env.example"]) assert.equal(await grep({ glob }), undefined, glob);
 	assert.equal(await grep({ path: "src" }), undefined);
+	mkdirSync(join(tree, " spaced"));
+	writeFileSync(join(tree, " spaced", ".env"), "D=4");
+	assert.equal((await grep({ path: " spaced" }))?.block, true);
+	assert.match((await grep({ path: "missing" }))?.reason ?? "", /could not list this path/);
 	for (const input of [{ path: join(directory, "agent"), glob: "*.json" }, { path: join(directory, "agent") }, { path: `@${join(directory, "agent")}`, glob: "auth.json" }, { path: directory }]) {
 		assert.equal((await grep(input))?.block, true, JSON.stringify(input));
 	}
