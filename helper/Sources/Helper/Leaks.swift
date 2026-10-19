@@ -162,7 +162,8 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
       continue
     }
     guard let data = FileManager.default.contents(atPath: path) else { continue }
-    let scrubbed = scanner.scrub(data)
+    let kept = Set((state.files[path]?.findings.registered ?? [:]).filter { unavailable.contains($0.value) }.keys)
+    let scrubbed = scanner.scrub(data, keeping: kept)
     if scrubbed != data {
       let temporary = path + ".pi-credentials-\(UUID().uuidString)"
       let attributes = try FileManager.default.attributesOfItem(atPath: path)
