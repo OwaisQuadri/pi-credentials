@@ -127,7 +127,7 @@ func summary(_ credential: Credential) -> String {
   let hosts = credential.hosts.isEmpty ? "any host" : credential.hosts.joined(separator: ", ")
   let rotation = credential.rotation.map { "; rotation link \($0)" } ?? ""
   return "\(credential.kind.rawValue), \(credential.kind == .apiKey ? hosts : "no hosts"); "
-    + "\"\(credential.description)\"\(rotation)"
+    + "\(credential.description.debugDescription)\(rotation)"
 }
 
 func run(_ command: String, _ input: Input) async throws {
@@ -226,7 +226,7 @@ func run(_ command: String, _ input: Input) async throws {
       ? "every project"
       : "project group '\(scope)' (\(catalog.groups[scope, default: []].joined(separator: ", ")))"
     try Keychain.authenticateOwner(
-      reason: command == "grant" ? "let agents use '\(name)' (\(summary(credential))) in \(target)" : "stop agents using '\(name)' in \(target)")
+      reason: command == "grant" ? "let agents use '\(name)' in \(target): \(summary(credential))" : "stop agents using '\(name)' in \(target)")
     credential.grants.removeAll { $0 == scope }
     if command == "grant" { credential.grants.append(scope) }
     catalog.credentials[name] = credential
