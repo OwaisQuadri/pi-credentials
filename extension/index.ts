@@ -87,6 +87,10 @@ function ripgrepPath(): string {
 	return existsSync(bundled) ? bundled : "rg";
 }
 
+function isInside(file: string, root: string): boolean {
+	return file === root || file.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
 const grepProtectedMessage = "pi-credentials refused this grep: it would search a .env file or a Pi auth file. Narrow the path or glob.";
 
 export function grepRefusal(path: string | undefined, glob: string | undefined, cwd: string, timeoutMs = 10_000): Promise<string | undefined> {
@@ -94,7 +98,7 @@ export function grepRefusal(path: string | undefined, glob: string | undefined, 
 	if (root === undefined) return Promise.resolve("pi-credentials could not read this path.");
 	if (path !== undefined && isProtectedPath(path, cwd)) return Promise.resolve(grepProtectedMessage);
 	const agent = agentDirectory();
-	const args = ["--files", "--hidden", "--null", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
+	const args = ["--files", "--hidden", "--null", "--color=never", "--path-separator", "/", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
 	return new Promise((done) => {
 		let isSettled = false;
 		let pending = "";
@@ -111,11 +115,11 @@ export function grepRefusal(path: string | undefined, glob: string | undefined, 
 		child.stdout.on("data", (chunk: string) => {
 			const parts = (pending + chunk).split("\0");
 			pending = parts.pop() ?? "";
-			if (parts.some((file) => isProtectedFile(file, cwd, agent))) finish(grepProtectedMessage);
+			if (parts.some((file) => !isInside(file, root) || isProtectedFile(file, cwd, agent))) finish(grepProtectedMessage);
 		});
 		child.on("error", () => finish("pi-credentials could not run ripgrep to check this grep."));
 		child.on("close", (code) => {
-			if (pending && isProtectedFile(pending, cwd, agent)) finish(grepProtectedMessage);
+			if (pending && (!isInside(pending, root) || isProtectedFile(pending, cwd, agent))) finish(grepProtectedMessage);
 			else if (code === 0 || code === 1 || (code === 2 && existsSync(root))) finish(undefined);
 			else finish("ripgrep could not list this path. It may be missing or unreadable.");
 		});

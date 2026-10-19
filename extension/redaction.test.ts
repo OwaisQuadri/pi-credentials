@@ -56,6 +56,12 @@ test("credential variables leave the Pi process and protected files stay unread"
 		assert.equal((await grep({ glob }))?.block, true, glob);
 	}
 	assert.equal((await grep({}))?.block, true);
+	const config = join(directory, "rgconfig");
+	writeFileSync(config, "--color=always\n--path-separator=\\\n");
+	process.env.RIPGREP_CONFIG_PATH = config;
+	assert.equal((await grep({}))?.block, true);
+	assert.equal(await grep({ path: "src" }), undefined);
+	delete process.env.RIPGREP_CONFIG_PATH;
 	for (const glob of ["*.ts", "*.md", ".env.example"]) assert.equal(await grep({ glob }), undefined, glob);
 	assert.equal(await grep({ path: "src" }), undefined);
 	mkdirSync(join(tree, " spaced"));
