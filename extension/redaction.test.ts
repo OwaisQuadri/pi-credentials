@@ -39,9 +39,16 @@ test("tool output never reaches the model with a registered key in it", async ()
 	assert.deepEqual(result.structuredContent, { token: "[cred:key]" });
 	assert.equal(await handlers.tool_result({ content: [{ type: "text", text: "clean" }] }, {}), undefined);
 
+	const circular: Record<string, unknown> = { token: "SECRET" };
+	circular.self = circular;
+	const unserializable = await handlers.tool_result({ content: [{ type: "text", text: "a SECRET b" }], details: circular }, {});
+	assert.equal(unserializable.isError, true);
+	assert.deepEqual(unserializable.details, {});
+
 	writeFileSync(join(directory, "broken"), "");
 	const withheld = await handlers.tool_result({ content: [{ type: "text", text: "a SECRET b" }], structuredContent: { token: "SECRET" }, details: { output: "SECRET" } }, {});
 	assert.equal(withheld.isError, true);
-	assert.equal(withheld.details, undefined);
+	assert.deepEqual(withheld.details, {});
+
 	assert.doesNotMatch(JSON.stringify(withheld), /SECRET/);
 });

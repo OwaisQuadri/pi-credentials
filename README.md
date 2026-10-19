@@ -103,7 +103,7 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 
 - Fuzzy Tab completion at each position, like `/model`: subcommand, then credential name with its description trimmed to the terminal width, then scope.
 - `/cred list` opens a scrollable picker: name, kind, description, grants, last use.
-- **Owner confirmation is required for add, edit, grant, revoke, and delete.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
+- **Owner confirmation is required for add, register, edit, grant, revoke, group, and delete.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
 - `/cred edit` changes metadata only: description, kind, hosts, apps, and rotation link. It never shows the value.
 
 ## Input
@@ -154,7 +154,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 | Layer | Strength |
 |---|---|
 | Keychain access list on each registered item | Enforced by macOS |
-| Catalog and grants inside the helper's Keychain storage, changed only after Touch ID | Soft: a shell can replace the catalog item; see Limits |
+| Catalog and grants inside the helper's Keychain storage, changed only after Touch ID | Enforced by macOS |
 | Helper and extension installed where the scope guard blocks agent writes | Enforced by Pi hooks |
 | Command guard blocks `security -w`, `security -g`, `dump-keychain`, and `.env` reads | Soft: blocks direct routes only |
 | Redaction of every tool result: each registered `api-key` and `app-password` of 8 or more characters becomes `[cred:name]` | Soft: backstop |
@@ -167,11 +167,9 @@ The broker scans saved chat history for credentials that leaked before redaction
 - A server that receives a key can log it.
 - `cred_sudo` gives root to each approved command. Root can bypass every layer above.
 - **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
-- **A shell can replace the catalog.** The helper re-creates the catalog item on each save, so only the helper can read the saved copy without a dialog. A process that deletes the item, or creates one before the first save, can still write its own grants and hosts. The command guard should block `security` calls that add or delete the `pi-credentials.catalog` service.
 - **Project scope is advisory against an agent that can run the helper.** The helper reads Git remotes from the directory it is given, and an agent can give it any directory. The command guard should block direct helper calls from the shell.
-- Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except ASCII `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes in any of those forms. Other encoders, partial values, and transformed values get through.
-- The helper refuses hosts, apps, group patterns, service names, accounts, descriptions, and rotation links with characters that could disguise a Touch ID prompt, and lists of more than 16 entries.
-- Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values. They can still reach output through a program that reads a `.env` file or through a `cred_type` target, and redaction does not catch them there.
+- Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes. Other encoders, partial values, and transformed values get through.
+- Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values, so they reach output only through a program that you approved.
 - `redact` and `request` list credentials that they could not read under `unavailable`. Output can still contain those values.
 
 ## Not included

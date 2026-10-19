@@ -273,15 +273,15 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event) => {
-		const texts = event.content.filter((part) => part.type === "text").map((part) => part.text);
-		const serialize = (value: unknown) => value === undefined ? undefined : JSON.stringify(value);
-		const structured = serialize(event.structuredContent);
-		const details = serialize(event.details);
-		const pieces = [...texts, structured ?? "", details ?? ""];
-		const withheld = (reason: string) => ({ content: [{ type: "text" as const, text: `pi-credentials withheld this output because ${reason}` }], structuredContent: undefined, details: undefined, isError: true });
-		let separator = `\u0000${randomUUID()}\u0000`;
-		while (pieces.some((piece) => piece.includes(separator))) separator = `\u0000${randomUUID()}\u0000`;
+		const withheld = (reason: string) => ({ content: [{ type: "text" as const, text: `pi-credentials withheld this output because ${reason}` }], structuredContent: undefined, details: {}, isError: true });
 		try {
+			const texts = event.content.filter((part) => part.type === "text").map((part) => part.text);
+			const serialize = (value: unknown) => value === undefined ? undefined : JSON.stringify(value);
+			const structured = serialize(event.structuredContent);
+			const details = serialize(event.details);
+			const pieces = [...texts, structured ?? "", details ?? ""];
+			let separator = `\u0000${randomUUID()}\u0000`;
+			while (pieces.some((piece) => piece.includes(separator))) separator = `\u0000${randomUUID()}\u0000`;
 			const result = await callHelper<{ text: string; redacted: string[]; unavailable: string[] }>("redact", { text: pieces.join(separator) }, AbortSignal.timeout(10_000));
 			if (!result.redacted.length && !result.unavailable.length) return undefined;
 			const redacted = result.text.split(separator);
@@ -294,7 +294,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 				try { return JSON.parse(text ?? ""); }
 				catch { return undefined; }
 			};
-			return { content, structuredContent: parse(redacted[index], structured), details: parse(redacted[index + 1], details) };
+			return { content, structuredContent: parse(redacted[index], structured), details: details === undefined ? undefined : parse(redacted[index + 1], details) ?? {} };
 		} catch (error) {
 			return withheld(`redaction failed: ${(error as Error).message}`);
 		}
