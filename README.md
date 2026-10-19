@@ -38,7 +38,17 @@ Only credentials that you register appear. Each entry has:
 | rotation link | Optional. The page where you replace this credential. |
 | grants | `global`, or one or more project groups |
 
-Registering a credential tightens the item's access list so that only the helper reads it without a prompt. macOS asks for your login password once per item. Other readers, such as `security find-generic-password -w`, get a visible macOS prompt.
+Registering a credential moves the item under the helper's ownership:
+
+1. The helper reads the existing item once. macOS shows a dialog, and you click Allow.
+2. The helper re-creates the item. Its access list then trusts only the helper, and its partition list holds only the helper's signing team.
+3. Other readers, including `security find-generic-password -w`, get a macOS dialog that you can deny.
+
+Items that you created with the `security` command trust `/usr/bin/security` and the `apple-tool:` partition. Any shell command can read those items silently until you register them.
+
+The helper never reads an item before you register it, because macOS cannot suppress the dialog for login-keychain items.
+
+The helper is signed with a Developer ID identity. Its designated requirement is its identifier and team, not a file hash, so a rebuilt helper keeps its access. A build with ad-hoc signing loses access after each rebuild.
 
 The agent reads the catalog with `cred_list`: names, descriptions, kinds, and actions for the current project. Never values.
 
