@@ -168,10 +168,10 @@ public struct LeakScanner: Sendable {
     return findings
   }
 
-  public func scrub(_ data: Data, keeping kept: Set<String> = []) -> Data {
+  public func scrub(_ data: Data) -> Data {
     var text = redactor.redact(String(decoding: data, as: UTF8.self), labelPrefix: "cred-scrubbed").text
     var replaced = Set<String>()
-    for (token, prefix) in tokens(in: Data(text.utf8)) where !kept.contains(Self.fingerprint(token)) && replaced.insert(token).inserted {
+    for (token, prefix) in tokens(in: Data(text.utf8)) where replaced.insert(token).inserted {
       text = text.replacingOccurrences(of: token, with: "[cred:unknown-\(prefix)\(Self.fingerprint(token))]")
     }
     return Data(text.utf8)

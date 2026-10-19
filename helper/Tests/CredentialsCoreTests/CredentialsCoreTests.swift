@@ -174,5 +174,4 @@ let catalog = Catalog(
   let after = ScanEntry(mtime: 500, findings: carried, previous: before)
   #expect(after.seen(ScanEntry.nameKey("anthropic", after.findings)) == 100)
   #expect(scanSignature(unreadable, unavailable: ["anthropic"]) != scanSignature(unreadable, unavailable: []))
-  #expect(unreadable.scrub(text, keeping: [LeakScanner.fingerprint(key)]) == text)
 }

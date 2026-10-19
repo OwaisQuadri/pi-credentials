@@ -147,11 +147,18 @@ func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
     scanned: scanned)
 }
 
+func unreadableForScrub(_ names: [String]) -> CredentialError {
+  CredentialError(
+    "keychain-unavailable",
+    "Could not read \(names.joined(separator: ", ")) from the Keychain, so scrub could mislabel their keys. Unlock the Keychain, or delete those credentials, and run /cred scrub again.")
+}
+
 let activeWindow: Double = 600
 
 func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (rewritten: Int, skipped: Int) {
   var state = loadScanState()
   let (scanner, unavailable) = scannerFor(catalog)
+  guard unavailable.isEmpty else { throw unreadableForScrub(unavailable) }
   var rewritten = 0
   var skipped = 0
   let cutoff = Date().timeIntervalSince1970 - activeWindow
@@ -162,8 +169,7 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
       continue
     }
     guard let data = FileManager.default.contents(atPath: path) else { continue }
-    let kept = Set((state.files[path]?.findings.registered ?? [:]).filter { unavailable.contains($0.value) }.keys)
-    let scrubbed = scanner.scrub(data, keeping: kept)
+    let scrubbed = scanner.scrub(data)
     if scrubbed != data {
       let temporary = path + ".pi-credentials-\(UUID().uuidString)"
       let attributes = try FileManager.default.attributesOfItem(atPath: path)

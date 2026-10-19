@@ -162,7 +162,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 ```
 
 - **How you resolve it.** `/cred rotated <name>` marks a registered credential as replaced. `/cred rotated <prefix>`, such as `sk-ant-`, marks every unregistered key of that format; a fingerprint marks one key. Each requires Touch ID. Marking a registered credential also hides its old value when a later scan finds it as an unregistered key. A warning returns only when the scan finds the key in a session where it was not found before the mark.
-- **Optional cleanup.** `/cred scrub` rewrites the matches in saved sessions to `[cred-scrubbed:name]` or `[cred:unknown-<prefix><fingerprint>]`. It requires Touch ID, keeps each file's modification time, and skips the current session and sessions changed in the last 10 minutes. Scrubbing does not resolve a warning, because the key can still work; only `/cred rotated` does.
+- **Optional cleanup.** `/cred scrub` rewrites the matches in saved sessions to `[cred-scrubbed:name]` or `[cred:unknown-<prefix><fingerprint>]`. It requires Touch ID and refuses while a registered credential cannot be read from the Keychain. It keeps each file's modification time, and skips the current session and sessions changed in the last 10 minutes. Scrubbing does not resolve a warning, because the key can still work; only `/cred rotated` does.
 - The warning and the scan never show the value. They show the credential name, or the key format's prefix only.
 
 ## Protection layers
