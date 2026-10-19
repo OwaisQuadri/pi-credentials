@@ -50,12 +50,12 @@ public struct Redactor: Sendable {
     return output
   }
 
-  public func redact(_ text: String) -> (text: String, names: [String]) {
+  public func redact(_ text: String, labelPrefix: String = "cred") -> (text: String, names: [String]) {
     var output = text
     var names: [String] = []
     for (form, label) in forms where output.contains(form) {
-      output = output.replacingOccurrences(of: form, with: label)
       let name = String(label.dropFirst(6).dropLast())
+      output = output.replacingOccurrences(of: form, with: "[\(labelPrefix):\(name)]")
       if !names.contains(name) { names.append(name) }
     }
     return (output, names)

@@ -2,7 +2,7 @@
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
-Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, and the read block for `.env` and Pi auth files work. These parts of the design are not built yet: leak warnings with `/cred scan | rotated | scrub`, one-time values and `{{secret:…}}` handles, the input mask toggle, and last use in `/cred list`.
+Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, the read block for `.env` and Pi auth files, leak warnings with `/cred scan | rotated | scrub`, and last use in `/cred list` work. These parts of the design are not built yet: one-time values and `{{secret:…}}` handles, and the input mask toggle.
 
 ## Install
 
@@ -116,7 +116,7 @@ ln -s <package directory>/scripts/cred.zsh ~/.local/bin/cred
 
 - Fuzzy Tab completion at each position, like `/model`: subcommand, then credential name with its description trimmed to the terminal width, then scope.
 - `/cred list` opens a scrollable picker: name, kind, description, grants, last use.
-- **Owner confirmation is required for add, register, edit, grant, revoke, group, and delete.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
+- **Owner confirmation is required for add, register, edit, grant, revoke, group, delete, rotated, and scrub.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
 - `/cred edit` changes metadata only: description, kind, hosts, apps, rotation link, and environment variable. It never shows the value.
 
 ## Input
@@ -149,18 +149,20 @@ In an interactive session, the agent offers the grant inline, and you confirm wi
 
 The broker scans saved chat history for credentials that leaked before redaction caught them, or that never passed through the broker.
 
-- **What it finds.** Registered values, including their base64 and URL-encoded forms, and well-known key formats, such as `sk-`, `sk-or-`, `lin_api_`, and `ghp_`. A match on a key format that is not registered offers to register the key, so it gets a name and a rotation link.
-- **When it runs.** At Pi startup, on sessions saved since the last scan. `/cred scan` scans the full history.
+- **What it finds.** Registered `api-key` and `app-password` values of 8 or more characters, including their base64 and URL-encoded forms, and well-known key formats, such as `sk-`, `sk-ant-`, `sk-or-v1-`, `sk-proj-`, `lin_api_`, `ghp_`, and `xoxb-`. The scan skips obvious placeholders, such as `sk-xxxx` or `sk-your-key-here`. It stores a fingerprint of each unregistered key, never the key.
+- **When it runs.** In the background at Pi startup, on sessions saved since the last scan. After you add, change, or delete a registered value, the next startup scan reads every session again. It reads only `.jsonl` session files: all of them under Pi's default session folder, and the files directly inside any other session folder that Pi has used. `/cred scan` scans the full history; 10 GB of sessions takes about 3 minutes. The scan state is in `~/.pi/agent/cred/scan.json`, mode 600.
 - **How it warns.** Like Pi's notice for a Model Context Protocol server that needs a login, a warning stays visible until you resolve it:
 
 ```
-⚠ 2 credentials leaked in chat history. Rotate them:
-  openrouter  3 sessions, last 2026-10-12  → <rotation link>
-  unknown sk-…  1 session, 2026-10-03      → /cred add to name it
+⚠ 12 credentials leaked in chat history. Rotate them:
+  openrouter  3 sessions, last 2026-10-12 → <rotation link>
+  10 unregistered sk-ant-… keys  53 sessions, last 2026-10-12 → rotate at the provider, then /cred rotated sk-ant-
+  1 unregistered ghp_… key  27 sessions, last 2026-10-15 → rotate at the provider, then /cred rotated ghp_
+  /cred scrub rewrites them in saved sessions.
 ```
 
-- **How you resolve it.** `/cred rotated <name>` marks the credential as replaced. The old value can stay in transcripts, because it no longer works.
-- **Optional cleanup.** `/cred scrub` rewrites the matches in saved transcripts to `[cred:name]`. It requires Touch ID, because it changes your history.
+- **How you resolve it.** `/cred rotated <name>` marks a registered credential as replaced. `/cred rotated <prefix>`, such as `sk-ant-`, marks every unregistered key of that format; a fingerprint marks one key. Each requires Touch ID. Marking a registered credential also hides its old value when a later scan finds it as an unregistered key. A warning returns only when the scan finds the key in a session where it was not found before the mark.
+- **Optional cleanup.** `/cred scrub` rewrites the matches in saved sessions to `[cred-scrubbed:name]` or `[cred:unknown-<prefix><fingerprint>]`. It requires Touch ID and refuses while a registered `api-key` or `app-password` credential cannot be read from the Keychain. It keeps each file's modification time, and skips the current session and sessions changed in the last 10 minutes. Scrubbing does not resolve a warning, because the key can still work; only `/cred rotated` does.
 - The warning and the scan never show the value. They show the credential name, or the key format's prefix only.
 
 ## Protection layers
@@ -224,7 +226,7 @@ Each command reads one JSON object from standard input and writes one JSON objec
 
 | Command | Input | Touch ID |
 |---|---|---|
-| `list` | `cwd` | No |
+| `list` | `cwd` | No; each credential includes `lastUse` |
 | `register` | `name`, `service`, `kind`, `description`, optional `account`, `hosts`, `apps`, `rotation` | Yes |
 | `add` | `name`, `value`, `kind`, `description`, optional `service` and metadata | Yes |
 | `edit` | `name` and the metadata to change | Yes |
@@ -237,6 +239,9 @@ Each command reads one JSON object from standard input and writes one JSON objec
 | `sudo` | `name`, `cwd`, `arguments`, optional `timeoutSeconds` (default 600, at most 3600) | Yes, showing the command |
 | `type` | `name`, `cwd`, `app`, optional `isActivating` (default true), `isReturnPressed` | No |
 | `env` | `cwd`, optional `path` (default `.env`) and `names` | No |
+| `scan` | optional `isFull` and `sessionDir` | No |
+| `rotated` | `name`: a credential name, a key format such as `sk-ant-`, or a fingerprint | Yes |
+| `scrub` | optional `exclude` (the current session file) | Yes |
 
 `notarize` and `sudo` return the exit status, standard output, and standard error, redacted and truncated to 1 MB each. Every action checks the grant for the project in `cwd` and logs the use or the refusal.
 

@@ -16,6 +16,30 @@ export interface Listing {
 	env: string;
 	grants: string[];
 	isGranted: boolean;
+	lastUse?: string;
+}
+
+export interface LeakReport {
+	leaks: { name: string; rotation?: string; sessions: number; last: string }[];
+	unknown: { fingerprint: string; prefix: string; sessions: number; last: string }[];
+	scanned: number;
+}
+
+export function describeLeaks(report: LeakReport): string[] | undefined {
+	const count = report.leaks.length + report.unknown.length;
+	if (!count) return undefined;
+	const sessions = (value: number) => `${value} session${value === 1 ? "" : "s"}`;
+	return [
+		`⚠ ${count} credential${count === 1 ? "" : "s"} leaked in chat history. Rotate ${count === 1 ? "it" : "them"}:`,
+		...report.leaks.map((leak) => `  ${leak.name}  ${sessions(leak.sessions)}, last ${leak.last} → ${leak.rotation ?? `/cred edit ${leak.name} to add a rotation link`}`),
+		...[...new Set(report.unknown.map((leak) => leak.prefix))].map((prefix) => {
+			const group = report.unknown.filter((leak) => leak.prefix === prefix);
+			const total = group.reduce((sum, leak) => sum + leak.sessions, 0);
+			const last = group.map((leak) => leak.last).sort().at(-1);
+			return `  ${group.length} unregistered ${prefix}… key${group.length === 1 ? "" : "s"}  ${sessions(total)}, last ${last} → rotate at the provider, then /cred rotated ${prefix}`;
+		}),
+		"  /cred scrub rewrites them in saved sessions.",
+	];
 }
 
 export interface Catalog {
@@ -61,5 +85,6 @@ export function callHelper<T>(command: string, input: Record<string, unknown>, s
 export function describeListing(listing: Listing): string {
 	const hosts = listing.kind === "api-key" ? ` · ${listing.hosts.length ? listing.hosts.join(", ") : "any host"}` : "";
 	const scope = listing.grants.length ? listing.grants.join(", ") : "not granted";
-	return `${listing.kind}${hosts} · ${scope} · ${listing.description}`;
+	const used = listing.lastUse ? ` · used ${new Date(listing.lastUse).toLocaleDateString("en-CA")}` : "";
+	return `${listing.kind}${hosts} · ${scope}${used} · ${listing.description}`;
 }

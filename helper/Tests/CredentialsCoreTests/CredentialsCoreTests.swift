@@ -86,3 +86,92 @@ let catalog = Catalog(
   }
   #expect(redactor.redact("code 1234567").text == "code 1234567")
 }
+
+@Test func leakScanFindsRegisteredAndUnknownKeysOnly() {
+  let registered = "sk-or-v1-Zq8Wm3Rt7Yp2Lk5Hn9Bv4Cx6Dj1Fg0Ss8Ee3Aa7Uu2Ii5Oo9"
+  let unknown = "lin_api_Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUi"
+  let scanner = LeakScanner(redactor: Redactor(values: [("router", registered)]))
+  let encoded = Data(registered.utf8).base64EncodedString()
+  let text = "{\"text\":\"\(encoded) and \(registered) then \(unknown); task-sk-" + String(repeating: "x", count: 40) + "\"}"
+  let findings = scanner.scan(Data(text.utf8))
+  #expect(findings.names == ["router"])
+  #expect(findings.unknown == [LeakScanner.fingerprint(unknown): "lin_api_"])
+  #expect(findings.registered == [LeakScanner.fingerprint(registered): "router"])
+  let scrubbed = String(decoding: scanner.scrub(Data(text.utf8)), as: UTF8.self)
+  #expect(!scrubbed.contains(registered) && !scrubbed.contains(encoded) && !scrubbed.contains(unknown))
+  let rescanned = scanner.scan(Data(scrubbed.utf8))
+  #expect(rescanned.names == findings.names && rescanned.unknown == findings.unknown)
+  #expect(scanner.scan(Data("no keys here: sk-short".utf8)).isEmpty)
+}
+
+@Test func leakScanSkipsPlaceholderKeys() {
+  let scanner = LeakScanner(redactor: Redactor(values: []))
+  for text in ["sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sk-proj-your-key-goes-here-1234567890abcdefgh", "ghp_" + String(repeating: "A", count: 36)] {
+    #expect(scanner.scan(Data(text.utf8)).isEmpty, "\(text)")
+  }
+  let real = "sk-ant-api03-Q7mZr2Kp9Lw4testVx8Nb3Jt6Hc1Fd5Gs0YeUiR4oP"
+  #expect(scanner.scan(Data(real.utf8)).unknown == [LeakScanner.fingerprint(real): "sk-ant-"])
+}
+
+@Test func leakScanFindsKeysAfterEscapedLineBreaks() {
+  let scanner = LeakScanner(redactor: Redactor(values: []))
+  let key = "sk-ant-api03-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUiR4oP"
+  for escape in ["\\n", "\\r", "\\t"] {
+    let text = "{\"text\":\"key:\(escape)\(key)\"}"
+    #expect(scanner.scan(Data(text.utf8)).unknown == [LeakScanner.fingerprint(key): "sk-ant-"], "\(escape)")
+    #expect(!String(decoding: scanner.scrub(Data(text.utf8)), as: UTF8.self).contains(key))
+  }
+  #expect(scanner.scan(Data("{\"text\":\"plainsk-ant-api03-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5\"}".utf8)).isEmpty)
+}
+
+@Test func scanEntryKeepsFirstSeenWhenRegisteredValueBecomesUnknown() {
+  let fingerprint = "0123456789ab"
+  var before = LeakFindings()
+  before.registered = [fingerprint: "router"]
+  let first = ScanEntry(mtime: 100, findings: before, previous: nil)
+  var after = LeakFindings()
+  after.unknown = [fingerprint: "sk-or-v1-"]
+  let second = ScanEntry(mtime: 500, findings: after, previous: first)
+  #expect(second.seen("key:" + fingerprint) == 100)
+  #expect(second.findings.registered == [fingerprint: "router"])
+}
+
+@Test func sessionRootsRejectEmptyRelativeAndCoveredFolders() {
+  let base = "/Users/u/.pi/agent/sessions"
+  #expect(addingSessionRoot("", to: [], defaultRoot: base).isEmpty)
+  #expect(addingSessionRoot("relative/dir", to: [""], defaultRoot: base).isEmpty)
+  #expect(addingSessionRoot(base + "/--cwd--", to: [], defaultRoot: base).isEmpty)
+  #expect(addingSessionRoot("/tmp/s/", to: [""], defaultRoot: base) == ["/tmp/s"])
+  #expect(isSessionFile("/a/b.jsonl") && !isSessionFile("/a/.env") && !isSessionFile("/a/b.jsonl.pi-credentials-X"))
+}
+
+@Test func nameFindingsAreKeyedByValue() {
+  let old = LeakScanner(redactor: Redactor(values: [("router", "first-secret-value-123")]))
+  let new = LeakScanner(redactor: Redactor(values: [("router", "second-secret-value-456")]))
+  #expect(old.signature != new.signature)
+  let before = ScanEntry(mtime: 100, findings: old.scan(Data("first-secret-value-123".utf8)), previous: nil)
+  let after = ScanEntry(mtime: 500, findings: new.scan(Data("second-secret-value-456".utf8)), previous: before)
+  #expect(after.seen(ScanEntry.nameKey("router", after.findings)) == 500)
+  let same = ScanEntry(mtime: 900, findings: old.scan(Data("first-secret-value-123".utf8)), previous: before)
+  #expect(same.seen(ScanEntry.nameKey("router", same.findings)) == 100)
+  let mixed = new.scan(Data("[cred-scrubbed:router] second-secret-value-456".utf8))
+  #expect(mixed.names == ["router"] && mixed.values?["router"] != nil)
+  let tied = LeakScanner(redactor: Redactor(values: [("x", "abcdefgh~")]))
+  let forms = tied.needles.map { String(decoding: $0.bytes, as: UTF8.self) }.sorted().joined(separator: "\n")
+  #expect(tied.scan(Data("abcdefgh~".utf8)).values?["x"] == LeakScanner.fingerprint(forms))
+}
+
+@Test func unreadableCredentialsKeepTheirFindings() {
+  let key = "sk-ant-api03-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUiR4oP"
+  let text = Data("leaked \(key) here".utf8)
+  let readable = LeakScanner(redactor: Redactor(values: [("anthropic", key)]))
+  let before = ScanEntry(mtime: 100, findings: readable.scan(text), previous: nil)
+  #expect(before.findings.names == ["anthropic"] && before.findings.unknown.isEmpty)
+  let unreadable = LeakScanner(redactor: Redactor(values: []))
+  let carried = carryingUnavailable(unreadable.scan(text), previous: before, unavailable: ["anthropic"])
+  #expect(carried.names == ["anthropic"] && carried.unknown.isEmpty)
+  #expect(carried.registered?[LeakScanner.fingerprint(key)] == "anthropic")
+  let after = ScanEntry(mtime: 500, findings: carried, previous: before)
+  #expect(after.seen(ScanEntry.nameKey("anthropic", after.findings)) == 100)
+  #expect(scanSignature(unreadable, unavailable: ["anthropic"]) != scanSignature(unreadable, unavailable: []))
+}

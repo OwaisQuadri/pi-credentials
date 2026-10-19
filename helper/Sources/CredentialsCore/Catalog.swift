@@ -27,6 +27,7 @@ public struct Credential: Codable, Equatable, Sendable {
   public var rotation: String?
   public var grants: [String]
   public var env: String?
+  public var rotatedAt: Double?
 
   public static func defaultEnvName(_ name: String) -> String {
     let upper = name.uppercased().map { $0.isLetter || $0.isNumber ? $0 : "_" }
@@ -54,6 +55,7 @@ public struct Catalog: Codable, Equatable, Sendable {
 
   public var credentials: [String: Credential] = [:]
   public var groups: [String: [String]] = [:]
+  public var dismissed: [String: Double]?
 
   public init(credentials: [String: Credential] = [:], groups: [String: [String]] = [:]) {
     self.credentials = credentials
