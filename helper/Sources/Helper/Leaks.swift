@@ -192,12 +192,7 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
       rewritten += 1
     }
     let findings = modificationTime(path).map { mtime in
-      (
-        mtime,
-        carryingUnavailable(
-          scanner.scan(FileManager.default.contents(atPath: path) ?? Data()), previous: state.files[path],
-          unavailable: unavailable)
-      )
+      (mtime, scanner.scan(FileManager.default.contents(atPath: path) ?? Data()))
     }
     state.files[path] = findings.flatMap {
       $0.1.isEmpty ? nil : ScanEntry(mtime: $0.0, findings: $0.1, previous: state.files[path])
