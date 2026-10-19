@@ -27,19 +27,21 @@ extension({
 	registerCommand: () => undefined,
 	registerTool: () => undefined,
 } as never);
-await handlers.session_start({}, { cwd: directory, ui: { notify: () => undefined } });
 
 test("tool output never reaches the model with a registered key in it", async () => {
 	const result = await handlers.tool_result({
-		content: [{ type: "text", text: "a SECRET b" }, { type: "image", data: "x", mimeType: "image/png" }, { type: "text", text: "clean" }],
+		content: [{ type: "text", text: "a SECRET b" }, { type: "image", data: "x", mimeType: "image/png" }, { type: "text", text: "bin\u0000ary" }],
 		structuredContent: { token: "SECRET" },
+		details: { output: "SECRET" },
 	}, {});
-	assert.deepEqual(result.content.map((part: any) => part.text), ["a [cred:key] b", undefined, "clean"]);
+	assert.deepEqual(result.content.map((part: any) => part.text), ["a [cred:key] b", undefined, "bin\u0000ary"]);
+	assert.deepEqual(result.details, { output: "[cred:key]" });
 	assert.deepEqual(result.structuredContent, { token: "[cred:key]" });
 	assert.equal(await handlers.tool_result({ content: [{ type: "text", text: "clean" }] }, {}), undefined);
 
 	writeFileSync(join(directory, "broken"), "");
-	const withheld = await handlers.tool_result({ content: [{ type: "text", text: "a SECRET b" }], structuredContent: { token: "SECRET" } }, {});
+	const withheld = await handlers.tool_result({ content: [{ type: "text", text: "a SECRET b" }], structuredContent: { token: "SECRET" }, details: { output: "SECRET" } }, {});
 	assert.equal(withheld.isError, true);
+	assert.equal(withheld.details, undefined);
 	assert.doesNotMatch(JSON.stringify(withheld), /SECRET/);
 });

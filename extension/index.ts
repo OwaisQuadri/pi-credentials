@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { callHelper, describeListing, HelperError, kinds, type Catalog, type Kind } from "./helper.ts";
 
@@ -65,6 +66,12 @@ export function completions(argumentText: string, catalog: Catalog): { value: st
 	return items.length ? items : null;
 }
 
+function parseKind(text: string | undefined): Kind | undefined {
+	if (text === undefined) return undefined;
+	if (!kinds.includes(text as Kind)) throw new HelperError("invalid-kind", `Kind must be one of: ${kinds.join(", ")}.`);
+	return text as Kind;
+}
+
 async function askMetadata(ctx: ExtensionContext, kind?: Kind) {
 	const selectedKind = kind ?? await ctx.ui.select("Kind", kinds) as Kind | undefined;
 	if (!selectedKind) return undefined;
@@ -97,19 +104,25 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			return [`${listing.name}: ${listing.description}`, `Kind: ${listing.kind}`, `Hosts: ${listing.hosts.join(", ") || "any"}`, `Apps: ${listing.apps.join(", ") || "any"}`, `Grants: ${listing.grants.join(", ") || "none"}`, listing.rotation ? `Rotate at: ${listing.rotation}` : ""].filter(Boolean).join("\n");
 		}
 		case "add": {
-			const metadata = await askMetadata(ctx, rest[0] as Kind | undefined);
+			requireName();
+			const kind = parseKind(rest[0]);
+			if (catalog.credentials.some((item) => item.name === name)) throw new HelperError("exists", `${name} is already registered. Use /cred edit.`);
+			const metadata = await askMetadata(ctx, kind);
 			if (!metadata) return undefined;
-			const value = await ctx.ui.input(`Value for ${requireName()}`, "Paste the secret");
+			const value = await ctx.ui.input(`Value for ${name}`, "Paste the secret");
 			if (!value) return undefined;
 			await callHelper("add", { name, value, ...metadata });
 			return `Stored ${name}. Grant it with /cred grant ${name} <scope>.`;
 		}
 		case "register": {
+			requireName();
 			const service = rest[0];
 			if (!service) throw new HelperError("missing-service", "Usage: /cred register <name> <keychain service> [kind]");
-			const metadata = await askMetadata(ctx, rest[1] as Kind | undefined);
+			const kind = parseKind(rest[1]);
+			if (catalog.credentials.some((item) => item.name === name)) throw new HelperError("exists", `${name} is already registered. Use /cred edit.`);
+			const metadata = await askMetadata(ctx, kind);
 			if (!metadata) return undefined;
-			await callHelper("register", { name: requireName(), service, ...metadata });
+			await callHelper("register", { name, service, ...metadata });
 			return `Registered ${name}. Other programs now get a macOS dialog before reading it.`;
 		}
 		case "edit": {
@@ -159,11 +172,12 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 	}
 }
 
-async function offerGrant(name: string, ctx: ExtensionContext): Promise<boolean> {
+async function offerGrant(name: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<boolean> {
 	if (!ctx.hasUI) return false;
 	const catalog = await refresh(ctx.cwd);
+	if (catalog.credentials.find((item) => item.name === name)?.kind !== "api-key") return false;
 	const scopes = [...catalog.projectGroups, "global"];
-	const choice = await ctx.ui.select(`An agent wants to use ${name}. Grant it?`, [...scopes.map((scope) => `Grant to ${scope}`), "Do not grant"]);
+	const choice = await ctx.ui.select(`An agent wants to use ${name}. Grant it?`, [...scopes.map((scope) => `Grant to ${scope}`), "Do not grant"], { signal });
 	if (!choice || choice === "Do not grant") return false;
 	await callHelper("grant", { name, scope: choice.slice("Grant to ".length) });
 	await refresh(ctx.cwd);
@@ -225,7 +239,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 				let response: HTTPResponse;
 				try { response = await send(); }
 				catch (error) {
-					if (!(error instanceof HelperError) || error.code !== "not-granted" || !(await offerGrant(name, ctx))) throw error;
+					if (!(error instanceof HelperError) || error.code !== "not-granted" || !(await offerGrant(name, ctx, signal))) throw error;
 					response = await send();
 				}
 				const notes = [response.isTruncated ? "Body truncated at 1 MB." : "", response.unavailable.length ? `Could not check output for: ${response.unavailable.join(", ")}.` : ""].filter(Boolean);
@@ -248,9 +262,9 @@ export default function piCredentials(pi: ExtensionAPI) {
 			description: Type.String({ description: "What the credential is for, kept in the catalog." }),
 			hosts: Type.Optional(Type.Array(Type.String(), { description: "Allowed hosts for an api-key." })),
 		}, { additionalProperties: false }),
-		async execute(_id, input, _signal, _update, ctx) {
+		async execute(_id, input, signal, _update, ctx) {
 			if (!ctx.hasUI) throw new Error("No user is present to enter a credential. Record the need and continue with other work.");
-			const value = await ctx.ui.input(`${input.reason} · value for ${input.name} (${input.kind})`, "Paste the secret, or press Escape to decline");
+			const value = await ctx.ui.input(`${input.reason} · value for ${input.name} (${input.kind})`, "Paste the secret, or press Escape to decline", { signal });
 			if (!value) throw new Error("The user declined to enter the credential.");
 			await callHelper("add", { name: input.name, value, kind: input.kind, description: input.description, hosts: input.hosts ?? [] });
 			await refresh(ctx.cwd);
@@ -259,25 +273,30 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event) => {
-		if (!cache.credentials.some((listing) => listing.kind === "api-key" || listing.kind === "app-password")) return undefined;
 		const texts = event.content.filter((part) => part.type === "text").map((part) => part.text);
-		const structured = event.structuredContent === undefined ? undefined : JSON.stringify(event.structuredContent);
-		const joined = [...texts, ...(structured === undefined ? [] : [structured])].join("\u0000");
+		const serialize = (value: unknown) => value === undefined ? undefined : JSON.stringify(value);
+		const structured = serialize(event.structuredContent);
+		const details = serialize(event.details);
+		const pieces = [...texts, structured ?? "", details ?? ""];
+		const withheld = (reason: string) => ({ content: [{ type: "text" as const, text: `pi-credentials withheld this output because ${reason}` }], structuredContent: undefined, details: undefined, isError: true });
+		let separator = `\u0000${randomUUID()}\u0000`;
+		while (pieces.some((piece) => piece.includes(separator))) separator = `\u0000${randomUUID()}\u0000`;
 		try {
-			const result = await callHelper<{ text: string; redacted: string[]; unavailable: string[] }>("redact", { text: joined });
+			const result = await callHelper<{ text: string; redacted: string[]; unavailable: string[] }>("redact", { text: pieces.join(separator) }, AbortSignal.timeout(10_000));
 			if (!result.redacted.length && !result.unavailable.length) return undefined;
-			const pieces = result.text.split("\u0000");
+			const redacted = result.text.split(separator);
+			if (redacted.length !== pieces.length) return withheld("redaction changed its structure.");
 			let index = 0;
-			const content = event.content.map((part) => part.type === "text" ? { ...part, text: pieces[index++] } : part);
+			const content = event.content.map((part) => part.type === "text" ? { ...part, text: redacted[index++] } : part);
 			if (result.unavailable.length) content.push({ type: "text", text: `pi-credentials could not check this output for: ${result.unavailable.join(", ")}.` });
-			let structuredContent = event.structuredContent;
-			if (structured !== undefined) {
-				try { structuredContent = JSON.parse(pieces[index]); }
-				catch { structuredContent = undefined; }
-			}
-			return { content, structuredContent };
+			const parse = (text: string | undefined, original: string | undefined) => {
+				if (original === undefined) return undefined;
+				try { return JSON.parse(text ?? ""); }
+				catch { return undefined; }
+			};
+			return { content, structuredContent: parse(redacted[index], structured), details: parse(redacted[index + 1], details) };
 		} catch (error) {
-			return { content: [{ type: "text", text: `pi-credentials withheld this output because redaction failed: ${(error as Error).message}` }], structuredContent: undefined, isError: true };
+			return withheld(`redaction failed: ${(error as Error).message}`);
 		}
 	});
 }

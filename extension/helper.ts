@@ -38,7 +38,11 @@ export function callHelper<T>(command: string, input: Record<string, unknown>, s
 		let output = "";
 		child.stdout.setEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => { output += chunk; });
-		child.on("error", (error) => reject(new HelperError("helper-unavailable", `pi-credentials helper failed to start (${error.message}). Run scripts/build.zsh in the package.`)));
+		child.stdin.on("error", () => undefined);
+		child.on("error", (error) => {
+			if (error.name === "AbortError") return reject(new HelperError("aborted", "The credential operation was cancelled."));
+			reject(new HelperError("helper-unavailable", `pi-credentials helper failed to start (${error.message}). Run scripts/build.zsh in the package.`));
+		});
 		child.on("close", () => {
 			let parsed: { error?: { code: string; message: string } } & T;
 			try { parsed = JSON.parse(output); }

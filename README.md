@@ -1,6 +1,8 @@
 # pi-credentials
 
-Status: the helper, `/cred` commands, `cred_list`, `cred_request`, `cred_ask`, and output redaction work. `cred_type`, `cred_sudo`, `cred_notarize`, `.env` creation, and leak warnings are not built yet.
+A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
+
+Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete`, `cred_list`, `cred_request`, `cred_ask`, and output redaction work. These parts of the design are not built yet: `cred_type`, `cred_sudo`, `cred_notarize`, `.env` creation, leak warnings with `/cred scan | rotated | scrub`, one-time values and `{{secret:…}}` handles, the input mask toggle, last use in `/cred list`, and the command guard rules.
 
 ## Install
 
@@ -15,10 +17,8 @@ Then register a key that is already in Keychain, define a project group, and gra
 ```text
 /cred register openrouter openrouter-api-key api-key
 /cred group work github.com/<org>/*
-/cred grant openrouter global
+/cred grant openrouter work
 ```
-
-A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
 ## Purpose
 
@@ -98,7 +98,7 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 ## Commands
 
 ```
-/cred add | edit | grant | revoke | delete | list | scan | rotated | scrub
+/cred add | register | edit | grant | revoke | group | delete | list | scan | rotated | scrub
 ```
 
 - Fuzzy Tab completion at each position, like `/model`: subcommand, then credential name with its description trimmed to the terminal width, then scope.
@@ -190,7 +190,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 
 While `cred_request` runs, the footer shows `🔑 <name>`.
 
-Every tool result passes through `redact` before the model sees it, once at least one `api-key` or `app-password` is registered. If redaction fails, the extension withholds the output and returns an error.
+Every tool result, including its structured content and details, passes through `redact` before the model sees it or the session saves it. If redaction fails or takes more than 10 seconds, the extension withholds the output and returns an error. Output from shell commands that you run yourself with `!` is not a tool result, so it is not redacted.
 
 ## Helper
 
