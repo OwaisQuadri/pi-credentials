@@ -284,7 +284,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 	pi.on("tool_result", async (event) => {
 		const withheld = (reason: string) => ({ content: [{ type: "text" as const, text: `pi-credentials withheld this output because ${reason}` }], structuredContent: undefined, details: {}, isError: true });
 		try {
-			const texts = event.content.filter((part) => part.type === "text").map((part) => part.text);
+			const parts = event.content ?? [];
+			const texts = parts.filter((part) => part.type === "text").map((part) => part.text);
 			const serialize = (value: unknown) => value === undefined ? undefined : JSON.stringify(value);
 			const structured = serialize(event.structuredContent);
 			const details = serialize(event.details);
@@ -296,7 +297,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 			const redacted = result.text.split(separator);
 			if (redacted.length !== pieces.length) return withheld("redaction changed its structure.");
 			let index = 0;
-			const content = event.content.map((part) => part.type === "text" ? { ...part, text: redacted[index++] } : part);
+			const content = parts.map((part) => part.type === "text" ? { ...part, text: redacted[index++] } : part);
 			if (result.unavailable.length) content.push({ type: "text", text: `pi-credentials could not check this output for: ${result.unavailable.join(", ")}.` });
 			const parse = (text: string | undefined, original: string | undefined) => {
 				if (original === undefined) return undefined;
