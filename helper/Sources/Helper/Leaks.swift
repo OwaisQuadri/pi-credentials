@@ -76,9 +76,9 @@ func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -
   var state = loadScanState()
   let (scanner, unavailable) = scannerFor(catalog)
   let started = Date().timeIntervalSince1970
-  let isComplete = unavailable.isEmpty
-  let since = isFull || (isComplete && state.signature != scanner.signature) ? nil : state.lastScan
-  if isComplete { state.signature = scanner.signature }
+  let signature = scanSignature(scanner, unavailable: unavailable)
+  let since = isFull || state.signature != signature ? nil : state.lastScan
+  state.signature = signature
   let known = Set(state.roots ?? [])
   state.roots = addingSessionRoot(extraRoot, to: state.roots ?? [], defaultRoot: sessionsRoot())
   let roots = [sessionsRoot()] + (state.roots ?? [])
@@ -102,14 +102,7 @@ func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -
       if let rootSince, mtime < rootSince { continue }
       guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { continue }
       scanned += 1
-      var findings = scanner.scan(data)
-      for name in state.files[path]?.findings.names ?? [] where unavailable.contains(name) && !findings.names.contains(name) {
-        findings.names.append(name)
-        if let value = state.files[path]?.findings.values?[name] {
-          findings.values = (findings.values ?? [:]).merging([name: value]) { current, _ in current }
-        }
-      }
-      findings.names.sort()
+      let findings = carryingUnavailable(scanner.scan(data), previous: state.files[path], unavailable: unavailable)
       state.files[path] =
         findings.isEmpty ? nil : ScanEntry(mtime: mtime, findings: findings, previous: state.files[path])
     }
@@ -158,7 +151,7 @@ let activeWindow: Double = 600
 
 func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (rewritten: Int, skipped: Int) {
   var state = loadScanState()
-  let scanner = scannerFor(catalog).scanner
+  let (scanner, unavailable) = scannerFor(catalog)
   var rewritten = 0
   var skipped = 0
   let cutoff = Date().timeIntervalSince1970 - activeWindow
@@ -192,7 +185,12 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
       rewritten += 1
     }
     let findings = modificationTime(path).map { mtime in
-      (mtime, scanner.scan(FileManager.default.contents(atPath: path) ?? Data()))
+      (
+        mtime,
+        carryingUnavailable(
+          scanner.scan(FileManager.default.contents(atPath: path) ?? Data()), previous: state.files[path],
+          unavailable: unavailable)
+      )
     }
     state.files[path] = findings.flatMap {
       $0.1.isEmpty ? nil : ScanEntry(mtime: $0.0, findings: $0.1, previous: state.files[path])

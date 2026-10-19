@@ -222,3 +222,25 @@ public struct ScanEntry: Codable, Sendable {
 
   public func seen(_ key: String) -> Double { firstSeen?[key] ?? mtime }
 }
+
+public func carryingUnavailable(_ scanned: LeakFindings, previous: ScanEntry?, unavailable: [String]) -> LeakFindings {
+  var findings = scanned
+  guard let previous, !unavailable.isEmpty else { return findings }
+  for name in previous.findings.names where unavailable.contains(name) && !findings.names.contains(name) {
+    findings.names.append(name)
+    if let value = previous.findings.values?[name] {
+      findings.values = (findings.values ?? [:]).merging([name: value]) { current, _ in current }
+    }
+  }
+  for (fingerprint, owner) in previous.findings.registered ?? [:]
+  where unavailable.contains(owner) && findings.unknown[fingerprint] != nil {
+    findings.unknown[fingerprint] = nil
+    findings.registered = (findings.registered ?? [:]).merging([fingerprint: owner]) { current, _ in current }
+  }
+  findings.names.sort()
+  return findings
+}
+
+public func scanSignature(_ scanner: LeakScanner, unavailable: [String]) -> String {
+  LeakScanner.fingerprint(([scanner.signature] + unavailable.sorted()).joined(separator: "\n"))
+}

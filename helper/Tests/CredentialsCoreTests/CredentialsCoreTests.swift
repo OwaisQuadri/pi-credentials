@@ -160,3 +160,18 @@ let catalog = Catalog(
   let forms = tied.needles.map { String(decoding: $0.bytes, as: UTF8.self) }.sorted().joined(separator: "\n")
   #expect(tied.scan(Data("abcdefgh~".utf8)).values?["x"] == LeakScanner.fingerprint(forms))
 }
+
+@Test func unreadableCredentialsKeepTheirFindings() {
+  let key = "sk-ant-api03-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUiR4oP"
+  let text = Data("leaked \(key) here".utf8)
+  let readable = LeakScanner(redactor: Redactor(values: [("anthropic", key)]))
+  let before = ScanEntry(mtime: 100, findings: readable.scan(text), previous: nil)
+  #expect(before.findings.names == ["anthropic"] && before.findings.unknown.isEmpty)
+  let unreadable = LeakScanner(redactor: Redactor(values: []))
+  let carried = carryingUnavailable(unreadable.scan(text), previous: before, unavailable: ["anthropic"])
+  #expect(carried.names == ["anthropic"] && carried.unknown.isEmpty)
+  #expect(carried.registered?[LeakScanner.fingerprint(key)] == "anthropic")
+  let after = ScanEntry(mtime: 500, findings: carried, previous: before)
+  #expect(after.seen(ScanEntry.nameKey("anthropic", after.findings)) == 100)
+  #expect(scanSignature(unreadable, unavailable: ["anthropic"]) != scanSignature(unreadable, unavailable: []))
+}
