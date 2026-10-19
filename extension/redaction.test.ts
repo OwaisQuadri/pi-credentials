@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
 const directory = mkdtempSync(join(tmpdir(), "pi-credentials-test-"));
@@ -42,15 +42,24 @@ test("credential variables leave the Pi process and protected files stay unread"
 	for (const path of [".env", "app/.env.local", "@.env", ".env/", "./x/../.env", ".ENV", `file://${directory}/%2Eenv`, join(directory, "agent//auth.json"), `${directory}/agent/./mcp-auth.json`]) {
 		assert.equal((await handlers.tool_call({ toolName: "read", input: { path } }, ctx))?.block, true, path);
 	}
-	assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", path: ".env" } }, ctx))?.block, true);
-	for (const glob of ["**/.env*", "*", ".e*", "**", "{a,.env}", "!*.ts"]) {
-		assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", glob } }, ctx))?.block, true, glob);
+	const tree = join(directory, "tree");
+	for (const [file, text] of [["backend/.env", "A=1"], [".env.development", "B=2"], ["src/a.ts", "x"], ["README.md", "x"], [".env.example", "C="]]) {
+		mkdirSync(dirname(join(tree, file)), { recursive: true });
+		writeFileSync(join(tree, file), text);
 	}
-	for (const glob of ["*.ts", "src/**/*.swift", "*.md", ".env.example", "*.json"]) {
-		assert.equal(await handlers.tool_call({ toolName: "grep", input: { pattern: ".", glob } }, ctx), undefined, glob);
+	mkdirSync(join(directory, "agent"), { recursive: true });
+	writeFileSync(join(directory, "agent", "auth.json"), "{}");
+	const treeCtx = { cwd: tree };
+	const grep = (input: { path?: string; glob?: string }, context = treeCtx) => handlers.tool_call({ toolName: "grep", input: { pattern: ".", ...input } }, context);
+	assert.equal((await grep({ path: ".env.development" }))?.block, true);
+	for (const glob of ["**/.env*", "*", ".e*", "**", "{a,.env}", "!*.ts", "**/backend/.env", ".env.dev*", "*.development", "\\.env", "[].]env"]) {
+		assert.equal((await grep({ glob }))?.block, true, glob);
 	}
-	for (const glob of ["*.json", "auth.*"]) {
-		assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", path: join(directory, "agent"), glob } }, ctx))?.block, true, glob);
+	assert.equal((await grep({}))?.block, true);
+	for (const glob of ["*.ts", "*.md", ".env.example"]) assert.equal(await grep({ glob }), undefined, glob);
+	assert.equal(await grep({ path: "src" }), undefined);
+	for (const input of [{ path: join(directory, "agent"), glob: "*.json" }, { path: join(directory, "agent") }, { path: `@${join(directory, "agent")}`, glob: "auth.json" }, { path: directory }]) {
+		assert.equal((await grep(input))?.block, true, JSON.stringify(input));
 	}
 	for (const path of [".env.example", "auth.json", "src/env.ts"]) {
 		assert.equal(await handlers.tool_call({ toolName: "read", input: { path } }, ctx), undefined, path);

@@ -485,7 +485,7 @@ func run(_ command: String, _ input: Input) async throws {
     guard !lines.isEmpty else {
       throw CredentialError("no-credentials", "No granted api-key or app-password credential could be written.")
     }
-    try mergeEnvFile(path, lines: lines)
+    try Cancellation.shared.guarded { try mergeEnvFile(path, lines: lines) }
     let variables = lines.map(\.name)
     logUse(input, groups: projectGroups, action: "env", target: path, result: variables.joined(separator: " "))
     struct Output: Encodable {

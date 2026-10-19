@@ -1,8 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { callHelper, describeListing, HelperError, kinds, type Catalog, type Kind } from "./helper.ts";
@@ -49,60 +51,53 @@ function realPath(path: string): string {
 	catch { return path; }
 }
 
-export function isProtectedPath(input: string, cwd: string): boolean {
+export function resolvePiPath(input: string, cwd: string): string | undefined {
 	let text = input.trim();
 	if (text.startsWith("@")) text = text.slice(1);
 	if (text === "~") text = homedir();
 	else if (text.startsWith("~/")) text = join(homedir(), text.slice(2));
 	if (/^file:\/\//i.test(text)) {
 		try { text = fileURLToPath(text); }
-		catch { return true; }
+		catch { return undefined; }
 	}
-	const full = realPath(isAbsolute(text) ? resolve(text) : resolve(cwd, text)).toLowerCase();
+	return isAbsolute(text) ? resolve(text) : resolve(cwd, text);
+}
+
+export function isProtectedPath(input: string, cwd: string): boolean {
+	const resolved = resolvePiPath(input, cwd);
+	if (resolved === undefined) return true;
+	const full = realPath(resolved).toLowerCase();
 	const base = basename(full);
 	if (base === ".env" || (base.startsWith(".env.") && !templateSuffixes.some((suffix) => base.endsWith(suffix)))) return true;
 	const agent = agentDirectory();
 	return ["auth.json", "mcp-auth.json"].some((name) => full === join(agent, name));
 }
 
-function globToRegExp(glob: string): RegExp {
-	let pattern = "";
-	for (let index = 0; index < glob.length; index += 1) {
-		const character = glob[index];
-		if (character === "*" && glob[index + 1] === "*") {
-			pattern += ".*";
-			index += glob[index + 2] === "/" ? 2 : 1;
-		} else if (character === "*") pattern += "[^/]*";
-		else if (character === "?") pattern += "[^/]";
-		else if (character === "{") pattern += "(?:";
-		else if (character === "}") pattern += ")";
-		else if (character === "," ) pattern += "|";
-		else if (character === "[") {
-			const close = glob.indexOf("]", index + 1);
-			if (close < 0) pattern += "\\[";
-			else {
-				pattern += `[${glob.slice(index + 1, close).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
-				index = close;
-			}
-		} else pattern += character.replace(/[.+^$()|\\]/g, "\\$&");
-	}
-	return new RegExp(`^${pattern}$`, "i");
-}
-
 function agentDirectory(): string {
 	return realPath(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")).toLowerCase();
 }
 
-export function isProtectedGlob(glob: string, searchPath: string, cwd: string): boolean {
-	const root = realPath(resolve(cwd, searchPath)).toLowerCase();
-	const agent = agentDirectory();
-	const isAgentInScope = agent === root || agent.startsWith(root.endsWith("/") ? root : `${root}/`);
-	const names = [".env", ".env.local", ".env.production", ...(isAgentInScope ? ["auth.json", "mcp-auth.json"] : [])];
-	if (glob.trim().startsWith("!")) return true;
-	let expression: RegExp;
-	try { expression = globToRegExp(glob.trim()); }
-	catch { return true; }
-	return names.some((name) => expression.test(name) || expression.test(`a/${name}`) || expression.test(`a/b/${name}`));
+export function isGrepProtected(path: string | undefined, glob: string | undefined, cwd: string, timeoutMs = 10_000): Promise<boolean> {
+	const root = resolvePiPath(path ?? ".", cwd);
+	if (root === undefined) return Promise.resolve(true);
+	const args = ["--files", "--hidden", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
+	return new Promise((done) => {
+		let isSettled = false;
+		const finish = (isProtected: boolean) => {
+			if (isSettled) return;
+			isSettled = true;
+			clearTimeout(timer);
+			child.kill("SIGKILL");
+			done(isProtected);
+		};
+		const child = spawn("rg", args, { stdio: ["ignore", "pipe", "ignore"] });
+		const timer = setTimeout(() => finish(true), timeoutMs);
+		createInterface({ input: child.stdout }).on("line", (line) => {
+			if (isProtectedPath(line, cwd)) finish(true);
+		});
+		child.on("error", () => finish(true));
+		child.on("close", (code) => finish(code !== 0 && code !== 1));
+	});
 }
 
 interface HTTPResponse {
@@ -232,7 +227,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			const choice = await ctx.ui.select(`Credentials · ● usable in this project${catalog.projectGroups.length ? ` (${catalog.projectGroups.join(", ")})` : ""}`, lines);
 			if (!choice) return undefined;
 			const listing = catalog.credentials[lines.indexOf(choice)];
-			return [`${listing.name}: ${listing.description}`, `Kind: ${listing.kind}`, `Hosts: ${listing.hosts.join(", ") || "any"}`, `Apps: ${listing.apps.join(", ") || "any"}`, `Grants: ${listing.grants.join(", ") || "none"}`, listing.rotation ? `Rotate at: ${listing.rotation}` : ""].filter(Boolean).join("\n");
+			return [`${listing.name}: ${listing.description}`, `Kind: ${listing.kind}`, `Hosts: ${listing.hosts.join(", ") || "any"}`, `Apps: ${listing.apps.join(", ") || "none (never typed)"}`, `Grants: ${listing.grants.join(", ") || "none"}`, listing.rotation ? `Rotate at: ${listing.rotation}` : ""].filter(Boolean).join("\n");
 		}
 		case "add": {
 			requireName();
@@ -268,7 +263,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 				change.kind = kind;
 			} else {
 				const current = field === "hosts" ? listing.hosts.join(", ") : field === "apps" ? listing.apps.join(", ") : field === "description" ? listing.description : field === "environment variable" ? listing.env : listing.rotation ?? "";
-				const text = await ctx.ui.input(`New ${field} (now: ${current || "none"})`, field === "hosts" || field === "apps" ? "comma separated, empty means any" : "");
+				const text = await ctx.ui.input(`New ${field} (now: ${current || "none"})`, field === "hosts" ? "comma separated, empty means any host" : field === "apps" ? "comma separated bundle identifiers, empty means never typed" : "");
 				if (text === undefined || (field === "description" && !text.trim())) return undefined;
 				const list = text.split(",").map((item) => item.trim()).filter(Boolean);
 				if (field === "hosts") change.hosts = list;
@@ -335,9 +330,9 @@ export default function piCredentials(pi: ExtensionAPI) {
 		const input = event.input as { path?: unknown; glob?: unknown };
 		const path = typeof input.path === "string" ? input.path : undefined;
 		const glob = event.toolName === "grep" && typeof input.glob === "string" ? input.glob : undefined;
-		const isProtected = (path !== undefined && isProtectedPath(path, ctx.cwd)) || (glob !== undefined && isProtectedGlob(glob, path ?? ".", ctx.cwd));
+		const isProtected = event.toolName === "grep" ? await isGrepProtected(path, glob, ctx.cwd) : path !== undefined && isProtectedPath(path, ctx.cwd);
 		if (!isProtected) return undefined;
-		return { block: true, reason: "pi-credentials protects .env and Pi auth files. Use cred_list and the cred tools, or cred_env to write a .env file." };
+		return { block: true, reason: event.toolName === "grep" ? "pi-credentials refused this grep: it could search a .env file or a Pi auth file, or the file list took over 10 seconds. Narrow the path or glob. Use cred_list and the cred tools for credentials." : "pi-credentials protects .env and Pi auth files. Use cred_list and the cred tools, or cred_env to write a .env file." };
 	});
 
 	async function useCredential<T>(name: string, ctx: ExtensionContext, usableKinds: Kind[], signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {

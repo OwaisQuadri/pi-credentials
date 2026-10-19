@@ -31,7 +31,7 @@ final class Cancellation: @unchecked Sendable {
     isCancelledValue = true
     let isExitAllowed = isExitAllowedValue
     lock.unlock()
-    if isExitAllowed { exit(130) }
+    if isExitAllowed { _exit(130) }
   }
 
   func guarded<T>(_ body: () throws -> T) rethrows -> T {
@@ -44,7 +44,7 @@ final class Cancellation: @unchecked Sendable {
       isExitAllowedValue = true
       lock.unlock()
     }
-    if isCancelled { exit(130) }
+    if isCancelled { _exit(130) }
     return try body()
   }
 }
@@ -89,8 +89,11 @@ final class OutputBuffer: @unchecked Sendable {
 
 func runProcess(
   _ executable: String, _ arguments: [String], input: Data?, cwd: String?, timeout: TimeInterval,
-  redactor: Redactor, forceStop: ((pid_t) -> Void)? = nil
+  redactor: Redactor, isCancellable: Bool = true, stop: ((pid_t, Int32) -> Void)? = nil
 ) throws -> ProcessResult {
+  if isCancellable && Cancellation.shared.isCancelled {
+    throw CredentialError("cancelled", "The action was cancelled.")
+  }
   let process = Process()
   process.executableURL = URL(fileURLWithPath: executable)
   process.arguments = arguments
@@ -125,12 +128,13 @@ func runProcess(
   let deadline = Date().addingTimeInterval(timeout)
   var isTimedOut = false
   while exited.wait(timeout: .now() + 0.2) == .timedOut {
-    guard Cancellation.shared.isCancelled || Date() >= deadline else { continue }
-    isTimedOut = !Cancellation.shared.isCancelled
-    process.terminate()
+    let isCancelled = isCancellable && Cancellation.shared.isCancelled
+    guard isCancelled || Date() >= deadline else { continue }
+    isTimedOut = !isCancelled
+    let pid = process.processIdentifier
+    if let stop { stop(pid, SIGTERM) } else { process.terminate() }
     if exited.wait(timeout: .now() + 3) == .timedOut {
-      forceStop?(process.processIdentifier)
-      kill(process.processIdentifier, SIGKILL)
+      if let stop { stop(pid, SIGKILL) } else { kill(pid, SIGKILL) }
       _ = exited.wait(timeout: .now() + 3)
     }
     break
@@ -192,10 +196,17 @@ func isRootProtected(_ path: String) -> Bool {
   }
 }
 
+func realPath(_ path: String) -> String? {
+  guard let pointer = realpath(path, nil) else { return nil }
+  defer { free(pointer) }
+  return String(cString: pointer)
+}
+
 func resolveProgram(_ program: String) throws -> String {
   if program.hasPrefix("/") {
-    let resolved = URL(fileURLWithPath: program).resolvingSymlinksInPath().path
-    guard FileManager.default.isExecutableFile(atPath: resolved), isRootProtected(resolved) else {
+    guard let resolved = realPath(program), FileManager.default.isExecutableFile(atPath: resolved),
+      isRootProtected(resolved)
+    else {
       throw CredentialError(
         "invalid-arguments",
         "\(program) must be an executable that root owns, in directories that only root can change.")
@@ -212,27 +223,52 @@ func resolveProgram(_ program: String) throws -> String {
   return found
 }
 
+func processTree(_ root: pid_t, redactor: Redactor) -> [pid_t] {
+  var found = [root]
+  var index = 0
+  while index < found.count && found.count < 4096 {
+    let parent = found[index]
+    index += 1
+    guard
+      let result = try? runProcess(
+        "/usr/bin/pgrep", ["-P", String(parent)], input: nil, cwd: nil, timeout: 5, redactor: redactor,
+        isCancellable: false)
+    else { continue }
+    for line in result.stdout.split(separator: "\n") {
+      if let child = pid_t(line.trimmingCharacters(in: .whitespaces)), !found.contains(child) { found.append(child) }
+    }
+  }
+  return found
+}
+
 func runSudo(_ command: [String], value: String, cwd: String?, timeout: TimeInterval, redactor: Redactor)
   throws -> ProcessResult
 {
   let validation = try runProcess(
     "/usr/bin/sudo", ["-S", "-v", "-p", ""], input: Data((value + "\n").utf8), cwd: cwd, timeout: 60,
     redactor: redactor)
+  guard !Cancellation.shared.isCancelled else {
+    throw CredentialError("cancelled", "The action was cancelled before the command ran.")
+  }
   guard !validation.isTimedOut else {
     throw CredentialError("sudo-timeout", "sudo did not finish checking the password within 60 seconds.")
   }
   guard validation.status == 0 else {
     throw CredentialError("sudo-refused", "sudo did not accept the password.")
   }
-  defer { _ = try? runProcess("/usr/bin/sudo", ["-k"], input: nil, cwd: nil, timeout: 10, redactor: redactor) }
+  defer {
+    _ = try? runProcess(
+      "/usr/bin/sudo", ["-k"], input: nil, cwd: nil, timeout: 10, redactor: redactor, isCancellable: false)
+  }
   let result = try runProcess(
     "/usr/bin/sudo", ["-n", "--"] + command, input: nil, cwd: cwd, timeout: timeout, redactor: redactor,
-    forceStop: { pid in
+    stop: { pid, number in
+      let targets = processTree(pid, redactor: redactor).map(String.init)
       _ = try? runProcess(
-        "/usr/bin/sudo", ["-n", "/usr/bin/pkill", "-KILL", "-P", String(pid)], input: nil, cwd: nil,
-        timeout: 10, redactor: redactor)
+        "/usr/bin/sudo", ["-S", "-p", "", "--", "/bin/kill", "-\(number)"] + targets,
+        input: Data((value + "\n").utf8), cwd: nil, timeout: 30, redactor: redactor, isCancellable: false)
     })
-  if result.status != 0 && result.stderr.contains("a password is required") {
+  if result.status == 1 && result.stderr.hasPrefix("sudo: a password is required") {
     throw CredentialError(
       "sudo-no-timestamp",
       "sudo did not keep the approval between steps. Check timestamp_timeout in sudoers; it must be above 0.")
