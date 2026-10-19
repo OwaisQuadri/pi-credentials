@@ -220,7 +220,11 @@ func run(_ command: String, _ input: Input) async throws {
       credential.service = input.service ?? "pi-credentials/\(name)"
       credential.account = name
       try Keychain.authenticateOwner(reason: "store a new credential '\(name)': \(summary(credential))")
-      try Keychain.add(service: credential.service, account: name, data: Data(value.utf8))
+      do {
+        try Keychain.add(service: credential.service, account: name, data: Data(value.utf8))
+      } catch let error as CredentialError where error.code == "keychain-exists" {
+        throw CredentialError(error.code, error.description + " Register it instead of adding a new value.")
+      }
     }
     catalog.credentials[name] = credential
     try Keychain.saveCatalog(catalog)

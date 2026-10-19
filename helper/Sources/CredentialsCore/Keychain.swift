@@ -79,7 +79,7 @@ public enum Keychain {
     if status == errSecDuplicateItem {
       throw CredentialError(
         "keychain-exists",
-        "A Keychain item already uses service '\(service)'. Register it instead of adding a new value.")
+        "Keychain item '\(service)' account '\(account)' already exists.")
     }
     guard status == errSecSuccess else { throw failure(status, "Add '\(service)'") }
   }
