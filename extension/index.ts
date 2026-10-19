@@ -43,6 +43,11 @@ function sessionDirectory(ctx: ExtensionContext): { sessionDir?: string } {
 	return directory ? { sessionDir: resolve(directory) } : {};
 }
 
+function sessionFile(ctx: ExtensionContext): string | undefined {
+	const file = ctx.sessionManager.getSessionFile();
+	return file ? resolve(file) : undefined;
+}
+
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };
 
 function showLeaks(ctx: ExtensionContext, report: LeakReport) {
@@ -352,7 +357,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 		}
 		case "scrub": {
 			if (!(await ctx.ui.confirm("Rewrite leaked values in saved sessions?", "Matches become [cred-scrubbed:name] or [cred:unknown-…] markers. Sessions changed in the last 10 minutes are skipped."))) return undefined;
-			const result = await callHelper<{ rewritten: number; skipped: number; report: LeakReport }>("scrub", { exclude: ctx.sessionManager.getSessionFile() });
+			const result = await callHelper<{ rewritten: number; skipped: number; report: LeakReport }>("scrub", { exclude: sessionFile(ctx) });
 			showLeaks(ctx, result.report);
 			return `Rewrote ${result.rewritten} files.${result.skipped ? ` Skipped ${result.skipped} recently active files; run /cred scrub again later.` : ""}`;
 		}

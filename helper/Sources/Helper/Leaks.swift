@@ -80,12 +80,19 @@ func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -
   let scanner = scannerFor(catalog)
   let started = Date().timeIntervalSince1970
   let since = isFull ? nil : state.lastScan
+  let known = Set(state.roots ?? [])
   state.roots = addingSessionRoot(extraRoot, to: state.roots ?? [], defaultRoot: sessionsRoot())
   let roots = [sessionsRoot()] + (state.roots ?? [])
   var scanned = 0
   var present = Set<String>()
+  var missing: [String] = []
   for (index, root) in roots.enumerated() {
-    guard let enumerator = FileManager.default.enumerator(atPath: root) else { continue }
+    guard FileManager.default.fileExists(atPath: root), let enumerator = FileManager.default.enumerator(atPath: root)
+    else {
+      missing.append(root)
+      continue
+    }
+    let rootSince = index == 0 || known.contains(root) ? since : nil
     while let relative = enumerator.nextObject() as? String {
       if index > 0, (enumerator.fileAttributes?[.type] as? FileAttributeType) == .typeDirectory {
         enumerator.skipDescendants()
@@ -93,7 +100,7 @@ func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -
       let path = root + "/" + relative
       guard isSessionFile(path), !present.contains(path), let mtime = modificationTime(path) else { continue }
       present.insert(path)
-      if let since, mtime < since { continue }
+      if let rootSince, mtime < rootSince { continue }
       guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { continue }
       scanned += 1
       let findings = scanner.scan(data)
@@ -101,7 +108,9 @@ func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -
         findings.isEmpty ? nil : ScanEntry(mtime: mtime, findings: findings, previous: state.files[path])
     }
   }
-  state.files = state.files.filter { present.contains($0.key) }
+  state.files = state.files.filter { path, _ in
+    present.contains(path) || missing.contains { path.hasPrefix($0 + "/") }
+  }
   state.lastScan = started
   try saveScanState(state)
   return (state, scanned)
