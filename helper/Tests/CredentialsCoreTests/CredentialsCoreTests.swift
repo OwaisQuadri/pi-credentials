@@ -144,3 +144,16 @@ let catalog = Catalog(
   #expect(addingSessionRoot("/tmp/s/", to: [""], defaultRoot: base) == ["/tmp/s"])
   #expect(isSessionFile("/a/b.jsonl") && !isSessionFile("/a/.env") && !isSessionFile("/a/b.jsonl.pi-credentials-X"))
 }
+
+@Test func nameFindingsAreKeyedByValue() {
+  let old = LeakScanner(redactor: Redactor(values: [("router", "first-secret-value-123")]))
+  let new = LeakScanner(redactor: Redactor(values: [("router", "second-secret-value-456")]))
+  #expect(old.signature != new.signature)
+  let before = ScanEntry(mtime: 100, findings: old.scan(Data("first-secret-value-123".utf8)), previous: nil)
+  let after = ScanEntry(mtime: 500, findings: new.scan(Data("second-secret-value-456".utf8)), previous: before)
+  #expect(after.seen(ScanEntry.nameKey("router", after.findings)) == 500)
+  let same = ScanEntry(mtime: 900, findings: old.scan(Data("first-secret-value-123".utf8)), previous: before)
+  #expect(same.seen(ScanEntry.nameKey("router", same.findings)) == 100)
+  let mixed = new.scan(Data("[cred-scrubbed:router] second-secret-value-456".utf8))
+  #expect(mixed.names == ["router"] && mixed.values?["router"] != nil)
+}

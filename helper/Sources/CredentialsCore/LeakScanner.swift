@@ -6,6 +6,7 @@ public struct LeakFindings: Codable, Equatable, Sendable {
   public var names: [String] = []
   public var unknown: [String: String] = [:]
   public var registered: [String: String]? = nil
+  public var values: [String: String]? = nil
 
   public var isEmpty: Bool { names.isEmpty && unknown.isEmpty }
 }
@@ -31,10 +32,18 @@ public struct LeakScanner: Sendable {
 
   let redactor: Redactor
   let needles: [(bytes: [UInt8], name: String)]
+  let valueFingerprints: [String: String]
+  public let signature: String
 
   public init(redactor: Redactor) {
     self.redactor = redactor
     needles = redactor.forms.map { (Array($0.text.utf8), String($0.label.dropFirst(6).dropLast())) }
+    var fingerprints: [String: String] = [:]
+    for needle in needles where fingerprints[needle.name] == nil {
+      fingerprints[needle.name] = Self.fingerprint(String(decoding: needle.bytes, as: UTF8.self))
+    }
+    valueFingerprints = fingerprints
+    signature = Self.fingerprint(fingerprints.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n"))
   }
 
   static func isTokenByte(_ byte: UInt8) -> Bool {
@@ -133,12 +142,15 @@ public struct LeakScanner: Sendable {
     findings.names = labels.names
     findings.unknown = labels.unknown
     data.withUnsafeBytes { buffer in
-      for needle in needles where !findings.names.contains(needle.name) {
+      for needle in needles where findings.values?[needle.name] == nil {
         guard let base = buffer.baseAddress else { break }
         let isFound = needle.bytes.withUnsafeBytes {
           memmem(base, buffer.count, $0.baseAddress, needle.bytes.count) != nil
         }
-        if isFound { findings.names.append(needle.name) }
+        if isFound {
+          if !findings.names.contains(needle.name) { findings.names.append(needle.name) }
+          findings.values = (findings.values ?? [:]).merging([needle.name: valueFingerprints[needle.name] ?? ""]) { current, _ in current }
+        }
       }
     }
     for (token, prefix) in tokens(in: data) {
@@ -185,7 +197,7 @@ public struct ScanEntry: Codable, Sendable {
   public var firstSeen: [String: Double]?
 
   static func keys(_ findings: LeakFindings) -> [String] {
-    findings.names.map { "name:" + $0 } + findings.unknown.keys.map { "key:" + $0 }
+    findings.names.map { nameKey($0, findings) } + findings.unknown.keys.map { "key:" + $0 }
       + (findings.registered ?? [:]).keys.map { "key:" + $0 }
   }
 
@@ -202,6 +214,10 @@ public struct ScanEntry: Codable, Sendable {
       seen[key] = previous?.firstSeen?[key] ?? (earlier.contains(key) ? previous?.mtime : nil) ?? mtime
     }
     firstSeen = seen
+  }
+
+  public static func nameKey(_ name: String, _ findings: LeakFindings) -> String {
+    "name:\(name):\(findings.values?[name] ?? "")"
   }
 
   public func seen(_ key: String) -> Double { firstSeen?[key] ?? mtime }

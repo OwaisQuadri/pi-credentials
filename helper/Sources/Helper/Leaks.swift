@@ -5,6 +5,7 @@ struct ScanState: Codable {
   var lastScan: Double?
   var files: [String: ScanEntry] = [:]
   var roots: [String]?
+  var signature: String?
 }
 
 struct LeakReport: Encodable {
@@ -24,7 +25,6 @@ struct LeakReport: Encodable {
   var unknown: [Unknown]
   var scanned: Int
 }
-
 
 func sessionsRoot() -> String {
   standardPath(
@@ -48,11 +48,7 @@ func saveScanState(_ state: ScanState) throws {
   chmod(path, 0o600)
 }
 
-func modificationTime(_ path: String) -> Double? {
-  var info = stat()
-  guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
-  return Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9
-}
+func modificationTime(_ path: String) -> Double? { fileIdentity(path)?.mtime }
 
 struct FileIdentity: Equatable {
   var size: off_t
@@ -79,7 +75,8 @@ func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -
   var state = loadScanState()
   let scanner = scannerFor(catalog)
   let started = Date().timeIntervalSince1970
-  let since = isFull ? nil : state.lastScan
+  let since = isFull || state.signature != scanner.signature ? nil : state.lastScan
+  state.signature = scanner.signature
   let known = Set(state.roots ?? [])
   state.roots = addingSessionRoot(extraRoot, to: state.roots ?? [], defaultRoot: sessionsRoot())
   let roots = [sessionsRoot()] + (state.roots ?? [])
@@ -124,7 +121,7 @@ func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
   var unknown: [String: (prefix: String, count: Int, last: Double)] = [:]
   for entry in state.files.values {
     for name in entry.findings.names where catalog.credentials[name] != nil {
-      if let rotated = catalog.credentials[name]?.rotatedAt, entry.seen("name:" + name) < rotated { continue }
+      if let rotated = catalog.credentials[name]?.rotatedAt, entry.seen(ScanEntry.nameKey(name, entry.findings)) < rotated { continue }
       let current = known[name] ?? (0, 0)
       known[name] = (current.count + 1, max(current.last, entry.mtime))
     }

@@ -573,7 +573,7 @@ func run(_ command: String, _ input: Input) async throws {
     let excluded = input.exclude.map(standardPath)
     let count = state.files.keys.filter { $0 != excluded && isSessionFile($0) }.count
     try Keychain.authenticateOwner(
-      reason: "rewrite \(count) saved session files, replacing leaked credential values with [cred-scrubbed:name] markers; sessions changed in the last 10 minutes are skipped")
+      reason: "rewrite \(count) saved session files, replacing leaked credential values and unregistered keys with [cred-scrubbed:name] or [cred:unknown-…] markers; sessions changed in the last 10 minutes are skipped")
     let result = try scrubSessions(catalog, excluding: input.exclude)
     struct Output: Encodable {
       var rewritten: Int
