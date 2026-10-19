@@ -391,10 +391,19 @@ func run(_ command: String, _ input: Input) async throws {
           "wrong-kind", "'\(name)' has kind \(credential.kind.rawValue); \(command) needs \(kinds.map(\.rawValue).joined(separator: " or "))."))
     }
     do {
+      var resolved: [String] = []
       if command == "sudo" {
         let arguments = try required(input.arguments, "arguments")
+        guard let program = arguments.first, !program.isEmpty else {
+          throw CredentialError("missing-field", "Provide the command to run as an argument list.")
+        }
+        resolved = [try resolveProgram(program)] + arguments.dropFirst()
+        let shown = describeCommand(resolved)
+        guard shown.count <= 400 else {
+          throw CredentialError("command-too-long", "The command is too long to show in full for approval.")
+        }
         try Keychain.authenticateOwner(
-          reason: "run as root with '\(name)' in \((input.cwd ?? "?").debugDescription): \(describeCommand(arguments).prefix(400))")
+          reason: "run as root with '\(name)' in \(describeCommand([input.cwd ?? "?"])): \(shown)")
       }
       let value = try Keychain.value(of: credential)
       let redaction = redactionValues(catalog)
@@ -407,9 +416,7 @@ func run(_ command: String, _ input: Input) async throws {
         emit(result)
       case "sudo":
         let timeout = min(max(input.timeoutSeconds ?? 600, 1), 3600)
-        let result = try runSudo(
-          try required(input.arguments, "arguments"), value: value, cwd: input.cwd, timeout: timeout,
-          redactor: redactor)
+        let result = try runSudo(resolved, value: value, cwd: input.cwd, timeout: timeout, redactor: redactor)
         logUse(input, groups: projectGroups, action: command, target: target, result: String(result.status))
         emit(result)
       default:
@@ -426,15 +433,19 @@ func run(_ command: String, _ input: Input) async throws {
 
   case "env":
     let cwd = try required(input.cwd, "cwd")
-    let path = input.path.map { $0.hasPrefix("/") ? $0 : cwd + "/" + $0 } ?? cwd + "/.env"
+    let root = URL(fileURLWithPath: cwd).resolvingSymlinksInPath().path
+    let requested = input.path.map { $0.hasPrefix("/") ? $0 : cwd + "/" + $0 } ?? cwd + "/.env"
+    let directory = URL(fileURLWithPath: (requested as NSString).deletingLastPathComponent)
+      .resolvingSymlinksInPath().path
+    let path = directory + "/" + (requested as NSString).lastPathComponent
     guard isEnvFileName(path) else {
-      throw CredentialError("invalid-path", "The file must be named .env or .env.<suffix>.")
-    }
-    let directory = (path as NSString).deletingLastPathComponent
-    if isInsideGitRepository(directory) && !isIgnoredByGit(path) {
       throw CredentialError(
-        "not-ignored", "Git does not ignore \(path). Add it to .gitignore first.")
+        "invalid-path", "The file must be named .env or .env.<suffix>, but not .example, .sample, .template, or .dist.")
     }
+    guard directory == root || directory.hasPrefix(root + "/") else {
+      throw CredentialError("invalid-path", "The file must be inside the project directory.")
+    }
+    try requireUncommittable(path)
     let granted = catalog.credentials.keys.sorted().filter {
       catalog.isGranted($0, remotes: projectRemotes) && envKinds.contains(catalog.credentials[$0]!.kind)
     }
@@ -448,27 +459,38 @@ func run(_ command: String, _ input: Input) async throws {
         "not-granted",
         "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes))")
     }
-    var lines: [String] = []
-    var variables: [String] = []
+    var lines: [(name: String, line: String)] = []
     var unavailable: [String] = []
+    var skipped: [String] = []
     for name in selected {
       let credential = try catalog.credential(name)
       let variable = credential.env ?? Credential.defaultEnvName(name)
+      guard !lines.contains(where: { $0.name == variable }) else {
+        throw CredentialError("duplicate-variable", "Two credentials use the variable \(variable). Rename one with /cred edit.")
+      }
       guard let value = try? Keychain.value(of: credential) else {
         unavailable.append(name)
         continue
       }
-      lines.append(envLine(variable, value))
-      variables.append(variable)
+      guard value.count >= Redactor.minimumLength else {
+        skipped.append(name)
+        continue
+      }
+      lines.append((variable, envLine(variable, value)))
     }
-    try writeEnvFile(path, lines: lines)
+    guard !lines.isEmpty else {
+      throw CredentialError("no-credentials", "No granted api-key or app-password credential could be written.")
+    }
+    try mergeEnvFile(path, lines: lines)
+    let variables = lines.map(\.name)
     logUse(input, groups: projectGroups, action: "env", target: path, result: variables.joined(separator: " "))
     struct Output: Encodable {
       var path: String
       var variables: [String]
       var unavailable: [String]
+      var skipped: [String]
     }
-    emit(Output(path: path, variables: variables, unavailable: unavailable))
+    emit(Output(path: path, variables: variables, unavailable: unavailable, skipped: skipped))
 
   case "redact":
     let redaction = redactionValues(catalog)

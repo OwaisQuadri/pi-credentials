@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CredentialsCore
 import Foundation
+import Security
 
 struct ProcessResult: Encodable {
   var status: Int32
@@ -13,12 +14,32 @@ struct ProcessResult: Encodable {
 
 let outputLimit = 1_000_000
 
-final class DataBox: @unchecked Sendable {
-  var data = Data()
+final class OutputBuffer: @unchecked Sendable {
+  private let lock = NSLock()
+  private var data = Data()
+  private var isOverflowed = false
+
+  func append(_ chunk: Data) {
+    lock.lock()
+    defer { lock.unlock() }
+    let room = outputLimit + 64 - data.count
+    if chunk.count > room {
+      data.append(chunk.prefix(max(room, 0)))
+      isOverflowed = true
+    } else {
+      data.append(chunk)
+    }
+  }
+
+  var snapshot: (data: Data, isOverflowed: Bool) {
+    lock.lock()
+    defer { lock.unlock() }
+    return (data, isOverflowed)
+  }
 }
 
 func runProcess(
-  _ executable: String, _ arguments: [String], input: Data, cwd: String?, timeout: TimeInterval,
+  _ executable: String, _ arguments: [String], input: Data?, cwd: String?, timeout: TimeInterval,
   redactor: Redactor
 ) throws -> ProcessResult {
   let process = Process()
@@ -26,43 +47,51 @@ func runProcess(
   process.arguments = arguments
   if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
   let stdin = Pipe()
-  let stdout = Pipe()
-  let stderr = Pipe()
-  process.standardInput = stdin
-  process.standardOutput = stdout
-  process.standardError = stderr
-  try process.run()
-  stdin.fileHandleForWriting.write(input)
-  try? stdin.fileHandleForWriting.close()
-  let group = DispatchGroup()
-  let outBox = DataBox()
-  let errBox = DataBox()
-  for (pipe, box) in [(stdout, outBox), (stderr, errBox)] {
-    group.enter()
-    let handle = pipe.fileHandleForReading
-    DispatchQueue.global().async {
-      box.data = handle.readDataToEndOfFile()
-      group.leave()
+  let outputs = [Pipe(), Pipe()]
+  let buffers = [OutputBuffer(), OutputBuffer()]
+  process.standardInput = input == nil ? FileHandle.nullDevice : stdin
+  process.standardOutput = outputs[0]
+  process.standardError = outputs[1]
+  for (pipe, buffer) in zip(outputs, buffers) {
+    pipe.fileHandleForReading.readabilityHandler = { handle in
+      let chunk = handle.availableData
+      if !chunk.isEmpty { buffer.append(chunk) }
     }
   }
-  let isTimedOut = group.wait(timeout: .now() + timeout) == .timedOut
+  let exited = DispatchSemaphore(value: 0)
+  process.terminationHandler = { _ in exited.signal() }
+  try process.run()
+  if let input {
+    let writer = stdin.fileHandleForWriting
+    DispatchQueue.global().async {
+      writer.write(input)
+      try? writer.close()
+    }
+  }
+  var isTimedOut = exited.wait(timeout: .now() + timeout) == .timedOut
   if isTimedOut {
     process.terminate()
-    group.wait()
+    if exited.wait(timeout: .now() + 3) == .timedOut {
+      kill(process.processIdentifier, SIGKILL)
+      isTimedOut = exited.wait(timeout: .now() + 3) == .timedOut || isTimedOut
+    }
   }
-  process.waitUntilExit()
-  let outData = outBox.data
-  let errData = errBox.data
-  func text(_ data: Data) -> (String, Bool) {
+  Thread.sleep(forTimeInterval: 0.2)
+  for pipe in outputs {
+    pipe.fileHandleForReading.readabilityHandler = nil
+    try? pipe.fileHandleForReading.close()
+  }
+  func text(_ buffer: OutputBuffer) -> (String, Bool) {
+    let (data, isOverflowed) = buffer.snapshot
     let redacted = redactor.redact(String(decoding: data, as: UTF8.self)).text
     let bytes = Data(redacted.utf8)
-    guard bytes.count > outputLimit else { return (redacted, false) }
+    guard bytes.count > outputLimit || isOverflowed else { return (redacted, false) }
     return (String(decoding: bytes.prefix(outputLimit), as: UTF8.self), true)
   }
-  let (out, isOutTruncated) = text(outData)
-  let (err, isErrTruncated) = text(errData)
+  let (out, isOutTruncated) = text(buffers[0])
+  let (err, isErrTruncated) = text(buffers[1])
   return ProcessResult(
-    status: process.terminationStatus, stdout: out, stderr: err,
+    status: process.isRunning ? -1 : process.terminationStatus, stdout: out, stderr: err,
     isTruncated: isOutTruncated || isErrTruncated, isTimedOut: isTimedOut)
 }
 
@@ -87,63 +116,122 @@ func notarize(_ arguments: [String], value: String, cwd: String?, redactor: Reda
     timeout: 3600, redactor: redactor)
 }
 
+let securePath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+
+func resolveProgram(_ program: String) throws -> String {
+  if program.hasPrefix("/") {
+    guard FileManager.default.isExecutableFile(atPath: program) else {
+      throw CredentialError("invalid-arguments", "\(program) is not an executable file.")
+    }
+    return program
+  }
+  guard !program.contains("/"),
+    let found = securePath.map({ $0 + "/" + program }).first(where: FileManager.default.isExecutableFile)
+  else {
+    throw CredentialError(
+      "invalid-arguments",
+      "'\(program)' is not in \(securePath.joined(separator: ":")). Pass the program's absolute path.")
+  }
+  return found
+}
+
 func runSudo(_ command: [String], value: String, cwd: String?, timeout: TimeInterval, redactor: Redactor)
   throws -> ProcessResult
 {
-  guard let first = command.first, !first.isEmpty else {
-    throw CredentialError("missing-field", "Provide the command to run as an argument list.")
+  let validation = try runProcess(
+    "/usr/bin/sudo", ["-S", "-v", "-p", ""], input: Data((value + "\n").utf8), cwd: cwd, timeout: 30,
+    redactor: redactor)
+  guard validation.status == 0 else {
+    throw CredentialError("sudo-refused", "sudo did not accept the password.")
   }
+  defer { _ = try? runProcess("/usr/bin/sudo", ["-k"], input: nil, cwd: nil, timeout: 10, redactor: redactor) }
   return try runProcess(
-    "/usr/bin/sudo", ["-S", "-k", "-p", "", "--"] + command, input: Data((value + "\n").utf8),
-    cwd: cwd, timeout: timeout, redactor: redactor)
+    "/usr/bin/sudo", ["-n", "--"] + command, input: nil, cwd: cwd, timeout: timeout, redactor: redactor)
 }
 
 func describeCommand(_ command: [String]) -> String {
   command.map { argument in
-    argument.allSatisfy({ $0.isLetter || $0.isNumber || "-_./=:@%+,".contains($0) })
-      ? argument : argument.debugDescription
+    let isPlain =
+      !argument.isEmpty
+      && argument.unicodeScalars.allSatisfy {
+        $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "-_./=:@%+,".unicodeScalars.contains($0))
+      }
+    if isPlain { return argument }
+    let escaped = argument.unicodeScalars.map { scalar -> String in
+      if scalar == "\"" || scalar == "\\" { return "\\" + String(scalar) }
+      if scalar.isASCII && scalar.value >= 32 && scalar.value < 127 { return String(scalar) }
+      return "\\u{\(String(scalar.value, radix: 16))}"
+    }.joined()
+    return "\"\(escaped)\""
   }.joined(separator: " ")
+}
+
+func isAppleSigned(_ pid: pid_t) -> Bool {
+  var code: SecCode?
+  let attributes = [kSecGuestAttributePid: pid] as CFDictionary
+  guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else {
+    return false
+  }
+  var requirement: SecRequirement?
+  guard SecRequirementCreateWithString("anchor apple generic" as CFString, [], &requirement) == errSecSuccess
+  else { return false }
+  return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+}
+
+func frontmostPid() -> pid_t? {
+  let system = AXUIElementCreateSystemWide()
+  var focused: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &focused) == .success,
+    let focused, CFGetTypeID(focused) == AXUIElementGetTypeID()
+  else { return NSWorkspace.shared.frontmostApplication?.processIdentifier }
+  var pid: pid_t = 0
+  AXUIElementGetPid(focused as! AXUIElement, &pid)
+  return pid
 }
 
 func typeValue(_ value: String, into app: String, credential: Credential, isActivating: Bool, isReturnPressed: Bool)
   throws -> String
 {
-  let isAllowed =
-    credential.apps.isEmpty
-    || credential.apps.contains { $0.caseInsensitiveCompare(app) == .orderedSame }
-  guard isAllowed else {
-    throw CredentialError(
-      "app-not-allowed", "Typing is limited to: \(credential.apps.joined(separator: ", ")).")
-  }
   guard AXIsProcessTrusted() else {
     throw CredentialError(
       "accessibility-required",
       "Allow \(CommandLine.arguments[0]) in System Settings > Privacy & Security > Accessibility, then try again.")
   }
-  guard
-    let target = NSWorkspace.shared.runningApplications.first(where: {
-      $0.bundleIdentifier?.caseInsensitiveCompare(app) == .orderedSame
-        || $0.localizedName?.caseInsensitiveCompare(app) == .orderedSame
-    })
-  else {
+  let matches = NSWorkspace.shared.runningApplications.filter {
+    $0.bundleIdentifier?.caseInsensitiveCompare(app) == .orderedSame
+      || $0.localizedName?.caseInsensitiveCompare(app) == .orderedSame
+  }
+  guard let target = matches.first else {
     throw CredentialError("app-not-running", "No running app matches '\(app)'.")
+  }
+  guard matches.count == 1 else {
+    throw CredentialError("app-ambiguous", "\(matches.count) running apps match '\(app)'. Use a bundle identifier.")
+  }
+  let identity = target.bundleIdentifier ?? ""
+  let isAllowed =
+    credential.apps.isEmpty
+    || credential.apps.contains { $0.caseInsensitiveCompare(identity) == .orderedSame }
+  guard isAllowed else {
+    throw CredentialError(
+      "app-not-allowed", "'\(identity)' is not in the allowed apps: \(credential.apps.joined(separator: ", ")).")
+  }
+  guard isAppleSigned(target.processIdentifier) else {
+    throw CredentialError("app-unsigned", "'\(identity)' does not have a valid Apple-issued signature.")
   }
   if isActivating {
     target.activate()
     let deadline = Date().addingTimeInterval(3)
-    while NSWorkspace.shared.frontmostApplication?.processIdentifier != target.processIdentifier,
-      Date() < deadline
-    {
+    while frontmostPid() != target.processIdentifier, Date() < deadline {
       RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-    }
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier else {
-      throw CredentialError("focus-failed", "'\(app)' did not come to the front.")
     }
   }
   let source = CGEventSource(stateID: .hidSystemState)
-  func post(_ event: CGEvent?) {
+  func post(_ event: CGEvent?) throws {
     guard let event else { return }
-    if isActivating { event.post(tap: .cghidEventTap) } else { event.postToPid(target.processIdentifier) }
+    if isActivating && frontmostPid() != target.processIdentifier {
+      throw CredentialError("focus-lost", "'\(identity)' lost focus, so typing stopped.")
+    }
+    event.postToPid(target.processIdentifier)
     usleep(8000)
   }
   for character in value {
@@ -151,62 +239,78 @@ func typeValue(_ value: String, into app: String, credential: Credential, isActi
     for isDown in [true, false] {
       let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: isDown)
       event?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-      post(event)
+      try post(event)
     }
   }
   if isReturnPressed {
-    post(CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true))
-    post(CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false))
+    try post(CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true))
+    try post(CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false))
   }
-  return target.bundleIdentifier ?? target.localizedName ?? app
+  return identity.isEmpty ? (target.localizedName ?? app) : identity
 }
 
 let envKinds: Set<Kind> = [.apiKey, .appPassword]
+let templateSuffixes = [".example", ".sample", ".template", ".dist"]
 
 func isEnvFileName(_ path: String) -> Bool {
-  let base = (path as NSString).lastPathComponent
-  return base == ".env" || (base.hasPrefix(".env.") && !base.contains("/"))
+  let base = (path as NSString).lastPathComponent.lowercased()
+  guard base == ".env" || base.hasPrefix(".env.") else { return false }
+  return !templateSuffixes.contains { base.hasSuffix($0) }
 }
 
-func isIgnoredByGit(_ path: String) -> Bool {
+func git(_ directory: String, _ arguments: [String]) -> Int32 {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+  process.arguments = ["-C", directory] + arguments
+  process.standardOutput = FileHandle.nullDevice
+  process.standardError = FileHandle.nullDevice
+  guard (try? process.run()) != nil else { return -1 }
+  process.waitUntilExit()
+  return process.terminationStatus
+}
+
+func requireUncommittable(_ path: String) throws {
   let directory = (path as NSString).deletingLastPathComponent
-  let process = Process()
-  process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-  process.arguments = ["-C", directory, "check-ignore", "-q", "--no-index", path]
-  process.standardOutput = FileHandle.nullDevice
-  process.standardError = FileHandle.nullDevice
-  guard (try? process.run()) != nil else { return false }
-  process.waitUntilExit()
-  return process.terminationStatus == 0
-}
-
-func isInsideGitRepository(_ directory: String) -> Bool {
-  let process = Process()
-  process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-  process.arguments = ["-C", directory, "rev-parse", "--is-inside-work-tree"]
-  process.standardOutput = FileHandle.nullDevice
-  process.standardError = FileHandle.nullDevice
-  guard (try? process.run()) != nil else { return false }
-  process.waitUntilExit()
-  return process.terminationStatus == 0
+  guard git(directory, ["rev-parse", "--is-inside-work-tree"]) == 0 else { return }
+  guard git(directory, ["ls-files", "--error-unmatch", "--", path]) != 0 else {
+    throw CredentialError("tracked", "Git tracks \(path). Remove it from the index first: git rm --cached.")
+  }
+  guard git(directory, ["check-ignore", "-q", "--", path]) == 0 else {
+    throw CredentialError("not-ignored", "Git does not ignore \(path). Add it to .gitignore first.")
+  }
 }
 
 func envLine(_ name: String, _ value: String) -> String {
   let isPlain = value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_-./+=:@".contains($0)) }
   if isPlain { return "\(name)=\(value)" }
+  if !value.contains("'") && !value.contains("\n") { return "\(name)='\(value)'" }
   let escaped = value.replacingOccurrences(of: "\\", with: "\\\\")
     .replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "$", with: "\\$")
+    .replacingOccurrences(of: "`", with: "\\`").replacingOccurrences(of: "\n", with: "\\n")
   return "\(name)=\"\(escaped)\""
 }
 
-func writeEnvFile(_ path: String, lines: [String]) throws {
+func mergeEnvFile(_ path: String, lines: [(name: String, line: String)]) throws {
+  var info = stat()
+  if lstat(path, &info) == 0 && (info.st_mode & S_IFMT) != S_IFREG {
+    throw CredentialError("invalid-path", "\(path) exists and is not a regular file.")
+  }
+  let existing = (FileManager.default.contents(atPath: path)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+  let managed = Set(lines.map(\.name))
+  var output = existing.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).filter { line in
+    let key = line.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "export ", with: "")
+      .split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) }
+    return key.map { !managed.contains($0) } ?? true
+  }
+  while output.last == "" { output.removeLast() }
+  output += lines.map(\.line)
   let directory = (path as NSString).deletingLastPathComponent
   let temporary = directory + "/.pi-credentials-\(UUID().uuidString).tmp"
   let descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
   guard descriptor >= 0 else {
     throw CredentialError("write-failed", "Could not write in \(directory): \(String(cString: strerror(errno))).")
   }
-  let data = Data((lines.joined(separator: "\n") + "\n").utf8)
+  let data = Data((output.joined(separator: "\n") + "\n").utf8)
   let written = data.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
   close(descriptor)
   guard written == data.count, rename(temporary, path) == 0 else {

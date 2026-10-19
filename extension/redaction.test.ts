@@ -37,12 +37,17 @@ test("credential variables leave the Pi process and protected files stay unread"
 	assert.equal(process.env.HARMLESS_SETTING, "plain-value");
 	assert.match(notes.join("\n"), /LEAKED_KEY/);
 
-	for (const path of [".env", "app/.env.local", "/Users/me/.pi/agent/auth.json", "~/.pi/agent/mcp-auth.json"]) {
-		assert.equal((await handlers.tool_call({ toolName: "read", input: { path } }, {}))?.block, true, path);
+	process.env.PI_CODING_AGENT_DIR = join(directory, "agent");
+	const ctx = { cwd: directory };
+	for (const path of [".env", "app/.env.local", "@.env", ".env/", "./x/../.env", ".ENV", `file://${directory}/%2Eenv`, join(directory, "agent//auth.json"), `${directory}/agent/./mcp-auth.json`]) {
+		assert.equal((await handlers.tool_call({ toolName: "read", input: { path } }, ctx))?.block, true, path);
 	}
+	assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", path: ".env" } }, ctx))?.block, true);
+	assert.equal((await handlers.tool_call({ toolName: "grep", input: { pattern: ".", glob: "**/.env*" } }, ctx))?.block, true);
 	for (const path of [".env.example", "auth.json", "src/env.ts"]) {
-		assert.equal(await handlers.tool_call({ toolName: "read", input: { path } }, {}), undefined, path);
+		assert.equal(await handlers.tool_call({ toolName: "read", input: { path } }, ctx), undefined, path);
 	}
+	delete process.env.PI_CODING_AGENT_DIR;
 });
 
 test("tool output never reaches the model with a registered key in it", async () => {

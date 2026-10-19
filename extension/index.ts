@@ -1,5 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { callHelper, describeListing, HelperError, kinds, type Catalog, type Kind } from "./helper.ts";
 
@@ -7,7 +11,7 @@ const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
 	add: "Store a new credential value",
 	register: "Take over an existing Keychain item",
-	edit: "Change a credential's description, kind, hosts, apps, or rotation link",
+	edit: "Change a credential's description, kind, hosts, apps, rotation link, or environment variable",
 	grant: "Let agents use a credential globally or in a project group",
 	revoke: "Remove a grant",
 	group: "Set or remove a project group's Git remote patterns",
@@ -23,7 +27,33 @@ interface ProcessResult {
 	isTimedOut: boolean;
 }
 
-const protectedFile = /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]+)?$|\.pi\/agent\/(mcp-)?auth\.json$/;
+const templateSuffixes = [".example", ".sample", ".template", ".dist"];
+
+function realPath(path: string): string {
+	try { return realpathSync.native(path); }
+	catch { return path; }
+}
+
+export function isProtectedPath(input: string, cwd: string): boolean {
+	let text = input.trim();
+	if (text.startsWith("@")) text = text.slice(1);
+	if (text === "~") text = homedir();
+	else if (text.startsWith("~/")) text = join(homedir(), text.slice(2));
+	if (/^file:\/\//i.test(text)) {
+		try { text = fileURLToPath(text); }
+		catch { return true; }
+	}
+	const full = realPath(isAbsolute(text) ? resolve(text) : resolve(cwd, text)).toLowerCase();
+	const base = basename(full);
+	if (base === ".env" || (base.startsWith(".env.") && !templateSuffixes.some((suffix) => base.endsWith(suffix)))) return true;
+	const agent = realPath(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")).toLowerCase();
+	return ["auth.json", "mcp-auth.json"].some((name) => full === join(agent, name));
+}
+
+function isProtectedGlob(glob: string): boolean {
+	const text = glob.toLowerCase();
+	return text.includes(".env") && !templateSuffixes.some((suffix) => text.endsWith(suffix)) || /(^|\/)(mcp-)?auth\.json$/.test(text);
+}
 
 interface HTTPResponse {
 	status: number;
@@ -59,7 +89,7 @@ function describeProcess(result: ProcessResult): string {
 }
 
 async function stripCredentialVariables(): Promise<string[]> {
-	const names = Object.keys(process.env).filter((name) => (process.env[name]?.length ?? 0) >= 8 && !process.env[name]!.includes("\n"));
+	const names = Object.keys(process.env).filter((name) => (process.env[name]?.length ?? 0) >= 8);
 	if (!names.length) return [];
 	const separator = `\u0000${randomUUID()}\u0000`;
 	const result = await callHelper<{ text: string; redacted: string[] }>("redact", { text: names.map((name) => process.env[name]).join(separator) }, AbortSignal.timeout(10_000));
@@ -245,10 +275,13 @@ export default function piCredentials(pi: ExtensionAPI) {
 		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
 	});
 
-	pi.on("tool_call", async (event) => {
-		if (event.toolName !== "read" && event.toolName !== "edit") return undefined;
-		const path = String((event.input as { path?: unknown }).path ?? "");
-		if (!protectedFile.test(path)) return undefined;
+	pi.on("tool_call", async (event, ctx) => {
+		if (!["read", "edit", "grep"].includes(event.toolName)) return undefined;
+		const input = event.input as { path?: unknown; glob?: unknown };
+		const path = typeof input.path === "string" ? input.path : undefined;
+		const glob = event.toolName === "grep" && typeof input.glob === "string" ? input.glob : undefined;
+		const isProtected = (path !== undefined && isProtectedPath(path, ctx.cwd)) || (glob !== undefined && isProtectedGlob(glob));
+		if (!isProtected) return undefined;
 		return { block: true, reason: "pi-credentials protects .env and Pi auth files. Use cred_list and the cred tools, or cred_env to write a .env file." };
 	});
 

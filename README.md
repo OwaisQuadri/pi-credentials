@@ -50,7 +50,7 @@ Only credentials that you register appear. Each entry has:
 | kind | `api-key`, `password`, `app-password`, or `passcode` |
 | Keychain item | The existing item's service name. The broker refers to it; it does not copy the value. |
 | allowed hosts | Optional, `api-key` only. Empty means any host. `api.example.com` matches only that host; `*.example.com` matches it and every subdomain. |
-| allowed apps | Optional, for typing. Empty means any app. |
+| allowed apps | Optional, for typing. Bundle identifiers, such as `com.apple.ScreenContinuity`. Empty means any app. |
 | rotation link | Optional. The page where you replace this credential. |
 | grants | `global`, or one or more project groups |
 | environment variable | Optional. The name in `.env` files. The default is the credential name in upper case, such as `OPENROUTER`. |
@@ -86,19 +86,19 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 |---|---|---|
 | `api-key` | `cred_request` | HTTP request with the key in a header. Refused for hosts outside the allowed list, when one is set. |
 | `password` | `cred_type` | Types into a named app window, in the background when the app allows it. |
-| `password` | `cred_sudo` | Runs one command through a sudo password helper. **Asks you to approve each exact command.** |
+| `password` | `cred_sudo` | Runs one command as root. **Asks you to approve each exact command.** |
 | `app-password` | `cred_notarize` | Runs `xcrun notarytool` with the password on standard input. |
 | `passcode` | `cred_type` | Same as above. |
 | `api-key`, `app-password` | `cred_env`, `/cred env`, `cred env create` | Writes a `.env` file with the credentials granted to this project. |
 | — | `cred_ask` | Asks you for a new secret in an input box. See [Input](#input). |
 
-`cred_type` takes a running app's bundle identifier or name. By default it brings the app to the front, checks that the app has focus, and types. With `isActivating: false` it sends the keys to the app's process in the background, which works only in apps that accept background input. An allowed-apps list on the credential restricts targets. The helper needs Accessibility permission: System Settings > Privacy & Security > Accessibility.
+`cred_type` takes a running app's bundle identifier or name. Exactly one running app must match, its signature must chain to Apple, and its bundle identifier must be in the credential's allowed apps when that list is set. The helper sends each key to that app's process. By default it brings the app to the front first and stops if another app takes focus. With `isActivating: false` it types in the background, which works only in apps that accept background input. The helper needs Accessibility permission: System Settings > Privacy & Security > Accessibility.
 
-`cred_sudo` runs one argument list, not a shell string, through `sudo -S`. Touch ID shows the exact command each time. It needs a user present.
+`cred_sudo` runs one argument list, not a shell string. The helper resolves a bare program name in `/usr/bin:/bin:/usr/sbin:/sbin` only; pass an absolute path for anything else. Touch ID shows the resolved command in full each time, and the helper refuses a command too long to show. The helper gives the password to `sudo -v`, runs the command with `sudo -n` and an empty standard input, then clears the sudo timestamp. It needs a user present.
 
 `cred_notarize` refuses `--password` and keychain-profile options, and requires `--apple-id` and `--team-id`. The helper passes the password on standard input, so it never appears in the process list.
 
-`.env` files hold only `api-key` and `app-password` credentials. The file must be named `.env` or `.env.<suffix>`. Inside a Git repository, Git must ignore it. The helper writes it with mode 600.
+`.env` files hold only `api-key` and `app-password` credentials of 8 or more characters. The file must be inside the project and be named `.env` or `.env.<suffix>`, but not `.example`, `.sample`, `.template`, or `.dist`. Inside a Git repository, Git must ignore the file and must not track it. An existing file keeps its other lines; the helper replaces only the variables that it manages. The helper writes the file with mode 600 and refuses a symlink.
 
 To use `cred env create` from your shell, link it once:
 
@@ -117,7 +117,7 @@ ln -s <package directory>/scripts/cred.zsh ~/.local/bin/cred
 - Fuzzy Tab completion at each position, like `/model`: subcommand, then credential name with its description trimmed to the terminal width, then scope.
 - `/cred list` opens a scrollable picker: name, kind, description, grants, last use.
 - **Owner confirmation is required for add, register, edit, grant, revoke, group, and delete.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
-- `/cred edit` changes metadata only: description, kind, hosts, apps, and rotation link. It never shows the value.
+- `/cred edit` changes metadata only: description, kind, hosts, apps, rotation link, and environment variable. It never shows the value.
 
 ## Input
 
@@ -206,7 +206,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 
 When a credential is not granted and you are present, `cred_request`, `cred_type`, `cred_sudo`, and `cred_notarize` offer the grant. While one of them runs, the footer shows `🔑 <name>`.
 
-The `read` and `edit` tools refuse `.env` and `.env.*` files, except `.example`, `.sample`, `.template`, and `.dist`, and Pi's `auth.json` and `mcp-auth.json`. The command guard refuses the same reads in the shell.
+The `read`, `edit`, and `grep` tools refuse `.env` and `.env.*` files, except `.example`, `.sample`, `.template`, and `.dist`, and Pi's `auth.json` and `mcp-auth.json`. The extension resolves the path the way Pi does, follows symlinks, and ignores case. `grep` is refused for those files and for globs that name them. A `grep` over a whole directory is not refused, so it can still match lines in a `.env` file that Git does not ignore. The command guard refuses the same reads in the shell.
 
 Every tool result from a tool that runs, including its structured content and details, passes through `redact` before the model sees it or the session saves it. If redaction fails or takes more than 10 seconds, the extension withholds the output and returns an error. Output from shell commands that you run yourself with `!` is not a tool result, so it is not redacted. Neither are refusals that Pi returns before a tool runs, such as an unknown tool or invalid arguments. Progress that a tool streams while it runs is shown unredacted; only the final result is redacted.
 

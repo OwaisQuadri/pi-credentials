@@ -23,7 +23,7 @@ done
 request=$(jq -cn --arg cwd "$PWD" --arg file "$file" '{cwd: $cwd} + (if $file == "" then {} else {path: $file} end) + {names: ($ARGS.positional | if length == 0 then null else . end)} | with_entries(select(.value != null))' --args -- "${names[@]}")
 if ! result=$(print -r -- "$request" | "$helper" env); then
   message=$(print -r -- "$result" | jq -r '.error.message // "the helper failed"')
-  print -u2 -r -- "cred: $message"
+  print -u2 -r -- "cred: ${message:-the helper failed}"
   exit 1
 fi
 print -r -- "$result" | jq -r '"Wrote \(.path) with \(if (.variables | length) > 0 then (.variables | join(", ")) else "no variables" end)." + (if (.unavailable | length) > 0 then " Could not read: \(.unavailable | join(", "))." else "" end)'
