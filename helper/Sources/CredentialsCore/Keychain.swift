@@ -124,16 +124,23 @@ public enum Keychain {
   }
 
   public static func loadCatalog() throws -> Catalog {
-    do {
-      let data = try read(service: catalogService, account: catalogAccount)
-      return try JSONDecoder().decode(Catalog.self, from: data)
-    } catch let error as CredentialError where error.code == "keychain-missing" {
+    for account in [catalogAccount, catalogStagingAccount, catalogAccount] {
       do {
-        let data = try read(service: catalogService, account: catalogStagingAccount)
+        let data = try read(service: catalogService, account: account)
         return try JSONDecoder().decode(Catalog.self, from: data)
-      } catch let staging as CredentialError where staging.code == "keychain-missing" {
-        return Catalog()
+      } catch let error as CredentialError where error.code == "keychain-missing" {
+        continue
       }
+    }
+    return Catalog()
+  }
+
+  static func isPresent(account: String) throws -> Bool {
+    do {
+      _ = try attributes(service: catalogService, account: account)
+      return true
+    } catch let error as CredentialError where error.code == "keychain-missing" {
+      return false
     }
   }
 
@@ -141,10 +148,22 @@ public enum Keychain {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     let data = try encoder.encode(catalog)
-    try delete(service: catalogService, account: catalogStagingAccount)
-    try add(service: catalogService, account: catalogStagingAccount, data: data)
-    try delete(service: catalogService, account: catalogAccount)
-    try add(service: catalogService, account: catalogAccount, data: data)
+    if try isPresent(account: catalogAccount) {
+      try delete(service: catalogService, account: catalogStagingAccount)
+      try add(service: catalogService, account: catalogStagingAccount, data: data)
+      try delete(service: catalogService, account: catalogAccount)
+    }
+    do {
+      try add(service: catalogService, account: catalogAccount, data: data)
+    } catch let error as CredentialError where error.code == "keychain-exists" {
+      throw CredentialError(
+        "catalog-replaced",
+        "Another program created Keychain item '\(catalogService)' during the save. Delete it, then run the command again.")
+    } catch {
+      throw CredentialError(
+        "catalog-incomplete",
+        "The change is saved in Keychain item '\(catalogService)' account '\(catalogStagingAccount)'. Run the command again to finish.")
+    }
     try delete(service: catalogService, account: catalogStagingAccount)
   }
 
