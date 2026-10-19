@@ -19,6 +19,14 @@ struct Input: Decodable {
   var request: HTTPRequest?
   var text: String?
   var session: String?
+  var env: String?
+  var arguments: [String]?
+  var app: String?
+  var isActivating: Bool?
+  var isReturnPressed: Bool?
+  var path: String?
+  var names: [String]?
+  var timeoutSeconds: Double?
 }
 
 struct Listing: Encodable {
@@ -28,6 +36,7 @@ struct Listing: Encodable {
   var hosts: [String]
   var apps: [String]
   var rotation: String?
+  var env: String
   var grants: [String]
   var isGranted: Bool
 }
@@ -135,6 +144,10 @@ func applyMetadata(_ input: Input, to credential: inout Credential) throws {
     try Catalog.validateApps(apps)
     credential.apps = apps
   }
+  if let env = input.env {
+    if !env.isEmpty { try Catalog.validateEnvName(env) }
+    credential.env = env.isEmpty ? nil : env
+  }
   if let rotation = input.rotation {
     try Catalog.validatePlain(rotation, field: "rotation")
     let isLink =
@@ -167,7 +180,7 @@ func run(_ command: String, _ input: Input) async throws {
       Listing(
         name: name, description: credential.description, kind: credential.kind,
         hosts: credential.hosts, apps: credential.apps, rotation: credential.rotation,
-        grants: credential.grants, isGranted: catalog.isGranted(name, remotes: projectRemotes))
+        env: credential.env ?? Credential.defaultEnvName(name), grants: credential.grants, isGranted: catalog.isGranted(name, remotes: projectRemotes))
     }
     struct Output: Encodable {
       var credentials: [Listing]
@@ -250,6 +263,9 @@ func run(_ command: String, _ input: Input) async throws {
     }
     if before.description != credential.description {
       changes.append("description → \(credential.description.debugDescription)")
+    }
+    if before.env != credential.env {
+      changes.append("environment variable → \(credential.env ?? Credential.defaultEnvName(name))")
     }
     if before.rotation != credential.rotation {
       changes.append("rotation link → \(credential.rotation ?? "none")")
@@ -350,6 +366,109 @@ func run(_ command: String, _ input: Input) async throws {
       logUse(input, groups: projectGroups, action: "request", target: host, result: "error")
       throw error
     }
+
+  case "notarize", "sudo", "type":
+    let name = try required(input.name, "name")
+    let kinds: [Kind] = command == "notarize" ? [.appPassword] : command == "sudo" ? [.password] : [.password, .passcode]
+    let target =
+      command == "type" ? (input.app ?? "?") : describeCommand(input.arguments ?? []).prefix(200).description
+    func refuse(_ error: CredentialError) -> CredentialError {
+      logUse(input, groups: projectGroups, action: command, target: target, result: error.code)
+      return error
+    }
+    guard let credential = catalog.credentials[name] else {
+      throw refuse(CredentialError("unknown-credential", "No registered credential is named '\(name)'."))
+    }
+    guard catalog.isGranted(name, remotes: projectRemotes) else {
+      throw refuse(
+        CredentialError(
+          "not-granted",
+          "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes))"))
+    }
+    guard kinds.contains(credential.kind) else {
+      throw refuse(
+        CredentialError(
+          "wrong-kind", "'\(name)' has kind \(credential.kind.rawValue); \(command) needs \(kinds.map(\.rawValue).joined(separator: " or "))."))
+    }
+    do {
+      if command == "sudo" {
+        let arguments = try required(input.arguments, "arguments")
+        try Keychain.authenticateOwner(
+          reason: "run as root with '\(name)' in \((input.cwd ?? "?").debugDescription): \(describeCommand(arguments).prefix(400))")
+      }
+      let value = try Keychain.value(of: credential)
+      let redaction = redactionValues(catalog)
+      let redactor = Redactor(values: redaction.values + [(name, value)])
+      switch command {
+      case "notarize":
+        let result = try notarize(
+          try required(input.arguments, "arguments"), value: value, cwd: input.cwd, redactor: redactor)
+        logUse(input, groups: projectGroups, action: command, target: target, result: String(result.status))
+        emit(result)
+      case "sudo":
+        let timeout = min(max(input.timeoutSeconds ?? 600, 1), 3600)
+        let result = try runSudo(
+          try required(input.arguments, "arguments"), value: value, cwd: input.cwd, timeout: timeout,
+          redactor: redactor)
+        logUse(input, groups: projectGroups, action: command, target: target, result: String(result.status))
+        emit(result)
+      default:
+        let app = try required(input.app, "app")
+        let typed = try typeValue(
+          value, into: app, credential: credential, isActivating: input.isActivating ?? true,
+          isReturnPressed: input.isReturnPressed ?? false)
+        logUse(input, groups: projectGroups, action: command, target: typed, result: "typed")
+        emit(["typed": typed])
+      }
+    } catch let error as CredentialError {
+      throw refuse(error)
+    }
+
+  case "env":
+    let cwd = try required(input.cwd, "cwd")
+    let path = input.path.map { $0.hasPrefix("/") ? $0 : cwd + "/" + $0 } ?? cwd + "/.env"
+    guard isEnvFileName(path) else {
+      throw CredentialError("invalid-path", "The file must be named .env or .env.<suffix>.")
+    }
+    let directory = (path as NSString).deletingLastPathComponent
+    if isInsideGitRepository(directory) && !isIgnoredByGit(path) {
+      throw CredentialError(
+        "not-ignored", "Git does not ignore \(path). Add it to .gitignore first.")
+    }
+    let granted = catalog.credentials.keys.sorted().filter {
+      catalog.isGranted($0, remotes: projectRemotes) && envKinds.contains(catalog.credentials[$0]!.kind)
+    }
+    let selected = input.names ?? granted
+    for name in selected where !granted.contains(name) {
+      let credential = try catalog.credential(name)
+      guard envKinds.contains(credential.kind) else {
+        throw CredentialError("wrong-kind", "'\(name)' has kind \(credential.kind.rawValue); .env files hold api-key and app-password credentials only.")
+      }
+      throw CredentialError(
+        "not-granted",
+        "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes))")
+    }
+    var lines: [String] = []
+    var variables: [String] = []
+    var unavailable: [String] = []
+    for name in selected {
+      let credential = try catalog.credential(name)
+      let variable = credential.env ?? Credential.defaultEnvName(name)
+      guard let value = try? Keychain.value(of: credential) else {
+        unavailable.append(name)
+        continue
+      }
+      lines.append(envLine(variable, value))
+      variables.append(variable)
+    }
+    try writeEnvFile(path, lines: lines)
+    logUse(input, groups: projectGroups, action: "env", target: path, result: variables.joined(separator: " "))
+    struct Output: Encodable {
+      var path: String
+      var variables: [String]
+      var unavailable: [String]
+    }
+    emit(Output(path: path, variables: variables, unavailable: unavailable))
 
   case "redact":
     let redaction = redactionValues(catalog)

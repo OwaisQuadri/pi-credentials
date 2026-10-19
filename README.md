@@ -2,7 +2,7 @@
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
-Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete`, `cred_list`, `cred_request`, `cred_ask`, and output redaction work. These parts of the design are not built yet: `cred_type`, `cred_sudo`, `cred_notarize`, `.env` creation, leak warnings with `/cred scan | rotated | scrub`, one-time values and `{{secret:…}}` handles, the input mask toggle, last use in `/cred list`, and the command guard rules.
+Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, and the read block for `.env` and Pi auth files work. These parts of the design are not built yet: leak warnings with `/cred scan | rotated | scrub`, one-time values and `{{secret:…}}` handles, the input mask toggle, and last use in `/cred list`.
 
 ## Install
 
@@ -37,7 +37,7 @@ Then register a key that is already in Keychain, define a project group, and gra
 ## Parts
 
 - **Swift helper.** A signed binary that reads registered Keychain items without a dialog, stores the catalog and grants, and asks for owner confirmation.
-- **Pi extension.** TypeScript. It provides the `/cred` command, the agent tools, and output redaction. It calls the helper and never caches values on disk.
+- **Pi extension.** TypeScript. It provides the `/cred` command, the agent tools, output redaction, and the read block. It calls the helper and never caches values on disk. At session start, it removes environment variables whose values match a registered `api-key` or `app-password` from the Pi process, so tools that Pi starts do not inherit them.
 
 ## Catalog
 
@@ -53,6 +53,7 @@ Only credentials that you register appear. Each entry has:
 | allowed apps | Optional, for typing. Empty means any app. |
 | rotation link | Optional. The page where you replace this credential. |
 | grants | `global`, or one or more project groups |
+| environment variable | Optional. The name in `.env` files. The default is the credential name in upper case, such as `OPENROUTER`. |
 
 Registering a credential moves the item under the helper's ownership:
 
@@ -88,10 +89,22 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 | `password` | `cred_sudo` | Runs one command through a sudo password helper. **Asks you to approve each exact command.** |
 | `app-password` | `cred_notarize` | Runs `xcrun notarytool` with the password on standard input. |
 | `passcode` | `cred_type` | Same as above. |
-| any granted | `cred env create` | Writes a `.env` file with the credentials granted to this project. |
+| `api-key`, `app-password` | `cred_env`, `/cred env`, `cred env create` | Writes a `.env` file with the credentials granted to this project. |
 | — | `cred_ask` | Asks you for a new secret in an input box. See [Input](#input). |
 
-`cred_type` takes a target app. It types into that app's window without focus when the app supports it, and checks focus first when the app needs focus. An allowed-apps list on the credential restricts targets further.
+`cred_type` takes a running app's bundle identifier or name. By default it brings the app to the front, checks that the app has focus, and types. With `isActivating: false` it sends the keys to the app's process in the background, which works only in apps that accept background input. An allowed-apps list on the credential restricts targets. The helper needs Accessibility permission: System Settings > Privacy & Security > Accessibility.
+
+`cred_sudo` runs one argument list, not a shell string, through `sudo -S`. Touch ID shows the exact command each time. It needs a user present.
+
+`cred_notarize` refuses `--password` and keychain-profile options, and requires `--apple-id` and `--team-id`. The helper passes the password on standard input, so it never appears in the process list.
+
+`.env` files hold only `api-key` and `app-password` credentials. The file must be named `.env` or `.env.<suffix>`. Inside a Git repository, Git must ignore it. The helper writes it with mode 600.
+
+To use `cred env create` from your shell, link it once:
+
+```zsh
+ln -s <package directory>/scripts/cred.zsh ~/.local/bin/cred
+```
 
 `.env` files: agents may create them but not read them. The read tool and command guard block direct reads. Programs that the agent runs can still read the file; see [Limits](#limits).
 
@@ -170,7 +183,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 - **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
 - **Project scope is advisory against an agent that can run the helper.** The helper reads Git remotes from the directory it is given, and an agent can give it any directory. The command guard should block direct helper calls from the shell.
 - Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes. Other encoders, partial values, and transformed values get through.
-- Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values, so they reach output only through a program that you approved.
+- Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values and never writes them to `.env` files. They can still reach output through the app that `cred_type` types into, or a command that `cred_sudo` runs.
 - `redact` and `request` list credentials that they could not read under `unavailable`. Output can still contain those values.
 
 ## Not included
@@ -185,9 +198,15 @@ The broker scans saved chat history for credentials that leaked before redaction
 |---|---|
 | `cred_list` | Names, kinds, descriptions, hosts, and whether this project may use each credential |
 | `cred_request` | An https request with a registered `api-key`. When the credential is not granted and you are present, Pi offers the grant. |
+| `cred_type` | Types a registered `password` or `passcode` into a running app |
+| `cred_sudo` | Runs one command as root with a registered `password`, after Touch ID shows the exact command |
+| `cred_notarize` | Runs `xcrun notarytool` with a registered `app-password` |
+| `cred_env` | Writes a `.env` file with the credentials granted to this project |
 | `cred_ask` | Asks you to enter a new secret, which goes straight to Keychain |
 
-While `cred_request` runs, the footer shows `🔑 <name>`.
+When a credential is not granted and you are present, `cred_request`, `cred_type`, `cred_sudo`, and `cred_notarize` offer the grant. While one of them runs, the footer shows `🔑 <name>`.
+
+The `read` and `edit` tools refuse `.env` and `.env.*` files, except `.example`, `.sample`, `.template`, and `.dist`, and Pi's `auth.json` and `mcp-auth.json`. The command guard refuses the same reads in the shell.
 
 Every tool result from a tool that runs, including its structured content and details, passes through `redact` before the model sees it or the session saves it. If redaction fails or takes more than 10 seconds, the extension withholds the output and returns an error. Output from shell commands that you run yourself with `!` is not a tool result, so it is not redacted. Neither are refusals that Pi returns before a tool runs, such as an unknown tool or invalid arguments. Progress that a tool streams while it runs is shown unredacted; only the final result is redacted.
 
@@ -214,6 +233,12 @@ Each command reads one JSON object from standard input and writes one JSON objec
 | `delete` | `name`, optional `isValueDeleted` | Yes |
 | `request` | `name`, `cwd`, `session`, `request` | No |
 | `redact` | `text` | No |
+| `notarize` | `name`, `cwd`, `arguments` | No |
+| `sudo` | `name`, `cwd`, `arguments`, optional `timeoutSeconds` (default 600, at most 3600) | Yes, showing the command |
+| `type` | `name`, `cwd`, `app`, optional `isActivating` (default true), `isReturnPressed` | No |
+| `env` | `cwd`, optional `path` (default `.env`) and `names` | No |
+
+`notarize` and `sudo` return the exit status, standard output, and standard error, redacted and truncated to 1 MB each. Every action checks the grant for the project in `cwd` and logs the use or the refusal.
 
 `request` accepts `method`, `url`, `headers`, `body`, `authHeader` (default `Authorization`), and `authPrefix` (default `Bearer `). It requires https, refuses redirects, uses no cache or cookie store, and redacts the response body and content type before it truncates the body to 1 MB.
 

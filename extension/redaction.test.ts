@@ -28,6 +28,23 @@ extension({
 	registerTool: () => undefined,
 } as never);
 
+test("credential variables leave the Pi process and protected files stay unread", async () => {
+	process.env.LEAKED_KEY = "xxSECRETxx";
+	process.env.HARMLESS_SETTING = "plain-value";
+	const notes: string[] = [];
+	await handlers.session_start({}, { cwd: directory, ui: { notify: (text: string) => notes.push(text) } });
+	assert.equal(process.env.LEAKED_KEY, undefined);
+	assert.equal(process.env.HARMLESS_SETTING, "plain-value");
+	assert.match(notes.join("\n"), /LEAKED_KEY/);
+
+	for (const path of [".env", "app/.env.local", "/Users/me/.pi/agent/auth.json", "~/.pi/agent/mcp-auth.json"]) {
+		assert.equal((await handlers.tool_call({ toolName: "read", input: { path } }, {}))?.block, true, path);
+	}
+	for (const path of [".env.example", "auth.json", "src/env.ts"]) {
+		assert.equal(await handlers.tool_call({ toolName: "read", input: { path } }, {}), undefined, path);
+	}
+});
+
 test("tool output never reaches the model with a registered key in it", async () => {
 	const result = await handlers.tool_result({
 		content: [{ type: "text", text: "a SECRET b" }, { type: "image", data: "x", mimeType: "image/png" }, { type: "text", text: "bin\u0000ary" }],

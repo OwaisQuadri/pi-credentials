@@ -26,6 +26,13 @@ public struct Credential: Codable, Equatable, Sendable {
   public var apps: [String]
   public var rotation: String?
   public var grants: [String]
+  public var env: String?
+
+  public static func defaultEnvName(_ name: String) -> String {
+    let upper = name.uppercased().map { $0.isLetter || $0.isNumber ? $0 : "_" }
+    let text = String(upper)
+    return text.first?.isNumber == true ? "_" + text : text
+  }
 
   public init(
     description: String, kind: Kind, service: String, account: String? = nil,
@@ -87,6 +94,10 @@ public struct Catalog: Codable, Equatable, Sendable {
 
   public static func validatePatterns(_ patterns: [String]) throws {
     try validate(patterns, field: "patterns", pattern: #"[a-z0-9._~:/*-]+"#, length: 256)
+  }
+
+  public static func validateEnvName(_ name: String) throws {
+    try validate([name], field: "env", pattern: #"[A-Z_][A-Z0-9_]*"#, length: 64)
   }
 
   public static func validatePlain(_ text: String, field: String) throws {
