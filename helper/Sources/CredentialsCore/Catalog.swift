@@ -62,6 +62,40 @@ public struct Catalog: Codable, Equatable, Sendable {
     }
   }
 
+  public static let listLimit = 16
+
+  static func validate(_ items: [String], field: String, pattern: String, length: Int) throws {
+    guard items.count <= listLimit else {
+      throw CredentialError("invalid-\(field)", "Use at most \(listLimit) \(field).")
+    }
+    for item in items {
+      let isValid =
+        item.count <= length && item.range(of: "^" + pattern + "$", options: .regularExpression) != nil
+      guard isValid else {
+        throw CredentialError("invalid-\(field)", "'\(item.prefix(64))' is not a valid entry for \(field).")
+      }
+    }
+  }
+
+  public static func validateHosts(_ hosts: [String]) throws {
+    try validate(hosts, field: "hosts", pattern: #"(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*"#, length: 253)
+  }
+
+  public static func validateApps(_ apps: [String]) throws {
+    try validate(apps, field: "apps", pattern: #"[A-Za-z0-9][A-Za-z0-9 ._-]*"#, length: 128)
+  }
+
+  public static func validatePatterns(_ patterns: [String]) throws {
+    try validate(patterns, field: "patterns", pattern: #"[a-z0-9._~:/*-]+"#, length: 256)
+  }
+
+  public static func validatePlain(_ text: String, field: String) throws {
+    guard text.count <= 256, !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    else {
+      throw CredentialError("invalid-\(field)", "Use up to 256 characters without control characters for \(field).")
+    }
+  }
+
   public func credential(_ name: String) throws -> Credential {
     guard let credential = credentials[name] else {
       throw CredentialError("unknown-credential", "No registered credential is named '\(name)'.")

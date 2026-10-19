@@ -152,8 +152,9 @@ The broker scans saved chat history for credentials that leaked before redaction
 - `cred_sudo` gives root to each approved command. Root can bypass every layer above.
 - **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
 - **Project scope is advisory against an agent that can run the helper.** The helper reads Git remotes from the directory it is given, and an agent can give it any directory. The command guard should block direct helper calls from the shell.
-- Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes. Other encoders, partial values, and transformed values get through.
-- Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values, so they reach output only through a program that you approved.
+- Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except ASCII `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes in any of those forms.
+- The helper refuses hosts, apps, group patterns, service names, and descriptions with characters that could disguise a Touch ID prompt, and lists of more than 16 entries. Other encoders, partial values, and transformed values get through.
+- Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values. They can still reach output through a program that reads a `.env` file or through a `cred_type` target, and redaction does not catch them there.
 - `redact` and `request` list credentials that they could not read under `unavailable`. Output can still contain those values.
 
 ## Not included

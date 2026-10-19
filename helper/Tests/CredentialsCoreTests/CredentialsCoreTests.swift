@@ -51,17 +51,31 @@ let catalog = Catalog(
   #expect(check("not a url") == "invalid-url")
 }
 
+@Test func promptTextRejectsSpoofedMetadata() {
+  for hosts in [["api.example.com", "*.example.org"]] {
+    #expect((try? Catalog.validateHosts(hosts)) != nil)
+  }
+  for hosts in [["a] → [b"], ["x.example\nevil"], ["*evil"], Array(repeating: "a.example", count: 17)] {
+    #expect((try? Catalog.validateHosts(hosts)) == nil)
+  }
+  #expect((try? Catalog.validatePatterns(["github.com/org/*"])) != nil)
+  #expect((try? Catalog.validatePatterns(["github.com/org/*; granted: none"])) == nil)
+  #expect((try? Catalog.validatePlain("ok", field: "service")) != nil)
+  #expect((try? Catalog.validatePlain("a\nb", field: "service")) == nil)
+}
+
 @Test func redactionCoversPlainAndEncodedForms() {
-  let secret = "sk-or-v1/abc+def ~x=="
+  let secret = "sk-or-v1/abc+dé ~x=="
   let redactor = Redactor(values: [("models", secret), ("pin", "1234567")])
   let base64 = Data(secret.utf8).base64EncodedString()
   let urlSafe = base64.trimmingCharacters(in: CharacterSet(charactersIn: "="))
     .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-  let strict = secret.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(.init(charactersIn: "-._~")))!
+  let strict = "sk-or-v1%2Fabc%2Bd%C3%A9%20~x%3D%3D"
   let forms = [
     secret, base64, urlSafe, strict, Redactor.lowercaseEscapes(strict),
     strict.replacingOccurrences(of: "%20", with: "+"), secret.replacingOccurrences(of: "/", with: "\\/"),
-  ]
+    Redactor.lowercaseEscapes(strict).replacingOccurrences(of: "%20", with: "+"),
+  ] + [base64].filter { $0.contains("/") }.map { $0.replacingOccurrences(of: "/", with: "\\/") }
   for form in forms {
     let result = redactor.redact("before \(form) after")
     #expect(result.text == "before [cred:models] after", "form: \(form)")

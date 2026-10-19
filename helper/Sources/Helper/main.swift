@@ -96,12 +96,28 @@ func redactionValues(_ catalog: Catalog) -> (values: [(name: String, value: Stri
   return (values, unavailable)
 }
 
-func applyMetadata(_ input: Input, to credential: inout Credential) {
-  if let description = input.description { credential.description = description }
+func applyMetadata(_ input: Input, to credential: inout Credential) throws {
+  if let description = input.description {
+    try Catalog.validatePlain(description, field: "description")
+    credential.description = description
+  }
   if let kind = input.kind { credential.kind = kind }
-  if let hosts = input.hosts { credential.hosts = hosts }
-  if let apps = input.apps { credential.apps = apps }
-  if let rotation = input.rotation { credential.rotation = rotation.isEmpty ? nil : rotation }
+  if let hosts = input.hosts {
+    let lowered = hosts.map { $0.lowercased() }
+    try Catalog.validateHosts(lowered)
+    credential.hosts = lowered
+  }
+  if let apps = input.apps {
+    try Catalog.validateApps(apps)
+    credential.apps = apps
+  }
+  if let rotation = input.rotation {
+    try Catalog.validatePlain(rotation, field: "rotation")
+    guard rotation.isEmpty || rotation.hasPrefix("https://") else {
+      throw CredentialError("invalid-rotation", "Use an https link for rotation.")
+    }
+    credential.rotation = rotation.isEmpty ? nil : rotation
+  }
 }
 
 func summary(_ credential: Credential) -> String {
@@ -137,15 +153,17 @@ func run(_ command: String, _ input: Input) async throws {
     var credential = Credential(
       description: try required(input.description, "description"),
       kind: try required(input.kind, "kind"), service: "")
-    applyMetadata(input, to: &credential)
+    try applyMetadata(input, to: &credential)
     if command == "register" {
       let service = try required(input.service, "service")
+      try Catalog.validatePlain(service, field: "service")
+      if let account = input.account { try Catalog.validatePlain(account, field: "account") }
       let account: String
       do {
         account = try Keychain.resolveAccount(service: service, account: input.account)
       } catch let error as CredentialError where error.code == "keychain-missing" {
         account = try Keychain.resolveAccount(
-          service: "pi-credentials.staging." + service, account: input.account)
+          service: Keychain.stagingPrefix + service, account: input.account)
       }
       try Keychain.authenticateOwner(
         reason: "take over Keychain item '\(service)' (account '\(account)') as '\(name)': \(summary(credential))")
@@ -155,6 +173,7 @@ func run(_ command: String, _ input: Input) async throws {
     } else {
       let value = try required(input.value, "value")
       guard !value.isEmpty else { throw CredentialError("missing-field", "Provide a value.") }
+      if let service = input.service { try Catalog.validatePlain(service, field: "service") }
       credential.service = input.service ?? "pi-credentials/\(name)"
       credential.account = name
       try Keychain.authenticateOwner(reason: "store a new credential '\(name)': \(summary(credential))")
@@ -168,17 +187,20 @@ func run(_ command: String, _ input: Input) async throws {
     let name = try required(input.name, "name")
     let before = try catalog.credential(name)
     var credential = before
-    applyMetadata(input, to: &credential)
+    try applyMetadata(input, to: &credential)
     var changes: [String] = []
-    if before.kind != credential.kind { changes.append("kind \(before.kind.rawValue) → \(credential.kind.rawValue)") }
+    if before.kind != credential.kind {
+      changes.append("kind \(before.kind.rawValue) → \(credential.kind.rawValue) (now \(summary(credential)))")
+    }
     if before.hosts != credential.hosts {
       changes.append("hosts [\(before.hosts.joined(separator: ", "))] → [\(credential.hosts.joined(separator: ", "))]" + (credential.hosts.isEmpty ? " (any host)" : ""))
     }
     if before.apps != credential.apps {
       changes.append("apps [\(before.apps.joined(separator: ", "))] → [\(credential.apps.joined(separator: ", "))]")
     }
-    if before.description != credential.description || before.rotation != credential.rotation {
-      changes.append("description or rotation link")
+    if before.description != credential.description { changes.append("description") }
+    if before.rotation != credential.rotation {
+      changes.append("rotation link → \(credential.rotation ?? "none")")
     }
     try Keychain.authenticateOwner(
       reason: "edit '\(name)': \(changes.isEmpty ? "no changes" : changes.joined(separator: "; "))")
@@ -211,6 +233,7 @@ func run(_ command: String, _ input: Input) async throws {
       throw CredentialError("invalid-name", "'global' is reserved.")
     }
     let patterns = try required(input.patterns, "patterns").compactMap(Catalog.normalizeRemote)
+    try Catalog.validatePatterns(patterns)
     let users = catalog.credentials.filter { $0.value.grants.contains(name) }.keys.sorted()
     try Keychain.authenticateOwner(
       reason: patterns.isEmpty

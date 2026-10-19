@@ -5,7 +5,7 @@ import Security
 public enum Keychain {
   static let catalogService = "pi-credentials.catalog"
   static let catalogAccount = "catalog"
-  static let stagingPrefix = "pi-credentials.staging."
+  public static let stagingPrefix = "pi-credentials.staging."
 
   static func baseQuery(service: String, account: String?) -> [String: Any] {
     var query: [String: Any] = [

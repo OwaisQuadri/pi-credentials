@@ -8,8 +8,8 @@ public struct Redactor: Sendable {
 
   public init(values: [(name: String, value: String)]) {
     var forms: [(String, String)] = []
-    var unreserved = CharacterSet.alphanumerics
-    unreserved.insert(charactersIn: "-._~")
+    let unreserved = CharacterSet(
+      charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
     for (name, value) in values where value.count >= Self.minimumLength {
       let label = "[cred:\(name)]"
       let base64 = Data(value.utf8).base64EncodedString()
@@ -17,12 +17,16 @@ public struct Redactor: Sendable {
       let urlSafe = unpadded.replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_")
       let percent = value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
-      let candidates = [
-        value, base64, unpadded, urlSafe, percent, Self.lowercaseEscapes(percent),
+      let lower = Self.lowercaseEscapes(percent)
+      let encoded = [
+        value, base64, unpadded, urlSafe, percent, lower,
         percent.replacingOccurrences(of: "%20", with: "+"),
-        value.replacingOccurrences(of: "/", with: "\\/"),
+        lower.replacingOccurrences(of: "%20", with: "+"),
       ]
-      for form in Set(candidates) { forms.append((form, label)) }
+      let escaped = encoded.filter { $0.contains("/") }.map {
+        $0.replacingOccurrences(of: "/", with: "\\/")
+      }
+      for form in Set(encoded + escaped) { forms.append((form, label)) }
     }
     self.forms = forms.sorted { $0.0.count > $1.0.count }
   }
