@@ -109,7 +109,13 @@ public enum Keychain {
     let attributes = try attributes(service: source, account: account)
     let value = try read(service: source, account: account)
     if !isRecovering {
-      if let staged = try? read(service: staging, account: account), staged != value {
+      let staged: Data?
+      do {
+        staged = try read(service: staging, account: account)
+      } catch let error as CredentialError where error.code == "keychain-missing" {
+        staged = nil
+      }
+      if let staged, staged != value {
         throw CredentialError(
           "adopt-conflict",
           "Keychain items '\(service)' and '\(staging)' hold different values. Delete the one you do not want, then run register again.")
@@ -176,7 +182,7 @@ public enum Keychain {
         : "Then run the command again."
       throw CredentialError(
         "catalog-replaced",
-        "Another program created Keychain item '\(catalogService)' during the save. Delete it. \(next)")
+        "Another program created Keychain item '\(catalogService)' account '\(catalogAccount)' during the save. Delete that item only. \(next)")
     } catch {
       guard isStaged else { throw error }
       throw CredentialError(
