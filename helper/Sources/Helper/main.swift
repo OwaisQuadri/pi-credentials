@@ -152,10 +152,10 @@ func summary(_ credential: Credential) -> String {
 }
 
 func run(_ command: String, _ input: Input) async throws {
-  if ["register", "add", "edit", "grant", "revoke", "group", "delete"].contains(command) {
-    try lockCatalog()
-  }
+  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete"].contains(command)
+  if isMutating { try lockCatalog() }
   var catalog = try Keychain.loadCatalog()
+  if isMutating, try Keychain.isCatalogStaged() { try Keychain.saveCatalog(catalog) }
   let projectRemotes = remotes(at: input.cwd)
   let projectGroups = catalog.groups(forRemotes: projectRemotes)
   switch command {

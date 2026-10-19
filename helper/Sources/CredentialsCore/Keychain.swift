@@ -115,6 +115,10 @@ public enum Keychain {
     try delete(service: service, account: account)
     do {
       try add(service: service, account: account, data: value, attributes: attributes)
+    } catch let error as CredentialError where error.code == "keychain-exists" {
+      throw CredentialError(
+        "adopt-replaced",
+        "Another program created Keychain item '\(service)' during register. The value is safe in '\(staging)'. Delete '\(service)', then run register again.")
     } catch {
       throw CredentialError(
         "adopt-incomplete",
@@ -135,6 +139,10 @@ public enum Keychain {
     return Catalog()
   }
 
+  public static func isCatalogStaged() throws -> Bool {
+    try !isPresent(account: catalogAccount) && isPresent(account: catalogStagingAccount)
+  }
+
   static func isPresent(account: String) throws -> Bool {
     do {
       _ = try attributes(service: catalogService, account: account)
@@ -148,7 +156,8 @@ public enum Keychain {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     let data = try encoder.encode(catalog)
-    if try isPresent(account: catalogAccount) {
+    let isStaged = try isPresent(account: catalogAccount)
+    if isStaged {
       try delete(service: catalogService, account: catalogStagingAccount)
       try add(service: catalogService, account: catalogStagingAccount, data: data)
       try delete(service: catalogService, account: catalogAccount)
@@ -160,9 +169,10 @@ public enum Keychain {
         "catalog-replaced",
         "Another program created Keychain item '\(catalogService)' during the save. Delete it, then run the command again.")
     } catch {
+      guard isStaged else { throw error }
       throw CredentialError(
         "catalog-incomplete",
-        "The change is saved in Keychain item '\(catalogService)' account '\(catalogStagingAccount)'. Run the command again to finish.")
+        "The change already applies from Keychain item '\(catalogService)' account '\(catalogStagingAccount)'. The next change to any credential finishes the save.")
     }
     try delete(service: catalogService, account: catalogStagingAccount)
   }
