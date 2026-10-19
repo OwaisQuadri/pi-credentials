@@ -24,6 +24,11 @@ interface HTTPResponse {
 }
 
 let cache: Catalog = { credentials: [], groups: {}, projectGroups: [] };
+const active = new Map<string, number>();
+
+function showActive(ctx: ExtensionContext) {
+	ctx.ui.setStatus("pi-credentials", active.size ? `🔑 ${[...active.keys()].join(", ")}` : undefined);
+}
 
 async function refresh(cwd: string): Promise<Catalog> {
 	cache = await callHelper<Catalog>("list", { cwd });
@@ -36,7 +41,7 @@ function isFuzzyMatch(query: string, text: string): boolean {
 	return index === query.length;
 }
 
-export function completions(argumentText: string, catalog: Catalog): { value: string; label: string; description?: string }[] | null {
+function completions(argumentText: string, catalog: Catalog): { value: string; label: string; description?: string }[] | null {
 	const parts = argumentText.split(/\s+/);
 	const current = (parts.pop() ?? "").toLowerCase();
 	const head = parts.length ? `${parts.join(" ")} ` : "";
@@ -234,7 +239,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 		async execute(_id, input, signal, _update, ctx) {
 			const { name, ...request } = input;
 			const send = () => callHelper<HTTPResponse>("request", { name, cwd: ctx.cwd, session: ctx.sessionManager.getSessionId(), request }, signal);
-			ctx.ui.setStatus("pi-credentials", `🔑 ${name}`);
+			active.set(name, (active.get(name) ?? 0) + 1);
+			showActive(ctx);
 			try {
 				let response: HTTPResponse;
 				try { response = await send(); }
@@ -246,7 +252,10 @@ export default function piCredentials(pi: ExtensionAPI) {
 				const text = [`HTTP ${response.status}${response.contentType ? ` · ${response.contentType}` : ""}`, ...notes, "", response.body].join("\n");
 				return { content: [{ type: "text", text }], details: { status: response.status, redacted: response.redacted } };
 			} finally {
-				ctx.ui.setStatus("pi-credentials", undefined);
+				const remaining = (active.get(name) ?? 1) - 1;
+				if (remaining > 0) active.set(name, remaining);
+				else active.delete(name);
+				showActive(ctx);
 			}
 		},
 	});
@@ -296,7 +305,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 			};
 			return { content, structuredContent: parse(redacted[index], structured), details: details === undefined ? undefined : parse(redacted[index + 1], details) ?? {} };
 		} catch (error) {
-			return withheld(`redaction failed: ${(error as Error).message}`);
+			return withheld(`redaction failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	});
 }
