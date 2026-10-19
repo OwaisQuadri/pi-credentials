@@ -61,12 +61,24 @@ func remotes(at directory: String?) -> [String] {
     .map { String($0.split(separator: " ").first ?? "") }))
 }
 
-func logUse(_ input: Input, groups: [String], action: String, target: String, result: String) {
+func credDirectory() -> String {
   let root =
     ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"]
     ?? NSHomeDirectory() + "/.pi/agent"
   let directory = root + "/cred"
   mkdir(directory, 0o700)
+  return directory
+}
+
+func lockCatalog() throws {
+  let descriptor = open(credDirectory() + "/catalog.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+  guard descriptor >= 0, flock(descriptor, LOCK_EX) == 0 else {
+    throw CredentialError("lock-failed", "Could not lock the credential catalog.")
+  }
+}
+
+func logUse(_ input: Input, groups: [String], action: String, target: String, result: String) {
+  let directory = credDirectory()
   let entry: [String: String] = [
     "time": ISO8601DateFormatter().string(from: Date()), "credential": input.name ?? "",
     "action": action, "target": target, "groups": groups.joined(separator: " "),
@@ -131,6 +143,9 @@ func summary(_ credential: Credential) -> String {
 }
 
 func run(_ command: String, _ input: Input) async throws {
+  if ["register", "add", "edit", "grant", "revoke", "group", "delete"].contains(command) {
+    try lockCatalog()
+  }
   var catalog = try Keychain.loadCatalog()
   let projectRemotes = remotes(at: input.cwd)
   let projectGroups = catalog.groups(forRemotes: projectRemotes)
@@ -162,16 +177,29 @@ func run(_ command: String, _ input: Input) async throws {
     if command == "register" {
       let service = try required(input.service, "service")
       try Catalog.validatePlain(service, field: "service")
+      guard service != Keychain.catalogService else {
+        throw CredentialError("invalid-service", "The catalog item cannot be registered.")
+      }
       let account: String
       do {
         account = try Keychain.resolveAccount(service: service, account: input.account)
       } catch let error as CredentialError where error.code == "keychain-missing" {
-        account = try Keychain.resolveAccount(
-          service: Keychain.stagingPrefix + service, account: input.account)
+        do {
+          account = try Keychain.resolveAccount(
+            service: Keychain.stagingPrefix + service, account: input.account)
+        } catch let staging as CredentialError where staging.code == "keychain-missing" {
+          throw error
+        }
       }
       try Catalog.validatePlain(account, field: "account")
+      if let owner = catalog.credentials.first(where: {
+        $0.value.service == service && $0.value.account == account
+      }) {
+        throw CredentialError(
+          "exists", "Keychain item \(service.debugDescription) is already registered as '\(owner.key)'.")
+      }
       try Keychain.authenticateOwner(
-        reason: "take over Keychain item '\(service)' (account '\(account)') as '\(name)': \(summary(credential))")
+        reason: "take over Keychain item \(service.debugDescription) (account \(account.debugDescription)) as '\(name)': \(summary(credential))")
       try Keychain.adopt(service: service, account: account)
       credential.service = service
       credential.account = account
@@ -204,7 +232,7 @@ func run(_ command: String, _ input: Input) async throws {
       changes.append("apps [\(before.apps.joined(separator: ", "))] → [\(credential.apps.joined(separator: ", "))]")
     }
     if before.description != credential.description {
-      changes.append("description → \(credential.description)")
+      changes.append("description → \(credential.description.debugDescription)")
     }
     if before.rotation != credential.rotation {
       changes.append("rotation link → \(credential.rotation ?? "none")")
@@ -261,8 +289,8 @@ func run(_ command: String, _ input: Input) async throws {
     let isValueDeleted = input.isValueDeleted ?? false
     try Keychain.authenticateOwner(
       reason: isValueDeleted
-        ? "delete '\(name)' and its Keychain item '\(credential.service)'"
-        : "unregister '\(name)' and keep Keychain item '\(credential.service)'")
+        ? "delete '\(name)' and its Keychain item \(credential.service.debugDescription)"
+        : "unregister '\(name)' and keep Keychain item \(credential.service.debugDescription)")
     if isValueDeleted {
       let account = try credential.account ?? Keychain.resolveAccount(service: credential.service, account: nil)
       try Keychain.delete(service: credential.service, account: account)

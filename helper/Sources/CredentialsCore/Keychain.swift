@@ -3,7 +3,7 @@ import LocalAuthentication
 import Security
 
 public enum Keychain {
-  static let catalogService = "pi-credentials.catalog"
+  public static let catalogService = "pi-credentials.catalog"
   static let catalogAccount = "catalog"
   public static let stagingPrefix = "pi-credentials.staging."
 
