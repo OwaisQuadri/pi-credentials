@@ -1,29 +1,6 @@
 import CredentialsCore
 import Foundation
 
-struct ScanEntry: Codable {
-  var mtime: Double
-  var findings: LeakFindings
-  var firstSeen: [String: Double]?
-
-  static func keys(_ findings: LeakFindings) -> [String] {
-    findings.names.map { "name:" + $0 } + findings.unknown.keys.map { "key:" + $0 }
-  }
-
-  init(mtime: Double, findings: LeakFindings, previous: ScanEntry?) {
-    self.mtime = mtime
-    self.findings = findings
-    let earlier = previous.map { Set(Self.keys($0.findings)) } ?? []
-    var seen: [String: Double] = [:]
-    for key in Self.keys(findings) {
-      seen[key] = previous?.firstSeen?[key] ?? (earlier.contains(key) ? previous?.mtime : nil) ?? mtime
-    }
-    firstSeen = seen
-  }
-
-  func seen(_ key: String) -> Double { firstSeen?[key] ?? mtime }
-}
-
 struct ScanState: Codable {
   var lastScan: Double?
   var files: [String: ScanEntry] = [:]
@@ -48,7 +25,6 @@ struct LeakReport: Encodable {
   var scanned: Int
 }
 
-func standardPath(_ path: String) -> String { (path as NSString).standardizingPath }
 
 func sessionsRoot() -> String {
   standardPath(
@@ -104,18 +80,18 @@ func scanSessions(_ catalog: Catalog, isFull: Bool, extraRoot: String?) throws -
   let scanner = scannerFor(catalog)
   let started = Date().timeIntervalSince1970
   let since = isFull ? nil : state.lastScan
-  var roots = [sessionsRoot()] + (state.roots ?? [])
-  if let extraRoot, !roots.contains(where: { standardPath(extraRoot) == $0 || standardPath(extraRoot).hasPrefix($0 + "/") }) {
-    roots.append(standardPath(extraRoot))
-    state.roots = (state.roots ?? []) + [standardPath(extraRoot)]
-  }
+  state.roots = addingSessionRoot(extraRoot, to: state.roots ?? [], defaultRoot: sessionsRoot())
+  let roots = [sessionsRoot()] + (state.roots ?? [])
   var scanned = 0
   var present = Set<String>()
-  for root in roots {
-    let enumerator = FileManager.default.enumerator(atPath: root)
-    while let relative = enumerator?.nextObject() as? String {
+  for (index, root) in roots.enumerated() {
+    guard let enumerator = FileManager.default.enumerator(atPath: root) else { continue }
+    while let relative = enumerator.nextObject() as? String {
+      if index > 0, (enumerator.fileAttributes?[.type] as? FileAttributeType) == .typeDirectory {
+        enumerator.skipDescendants()
+      }
       let path = root + "/" + relative
-      guard !present.contains(path), let mtime = modificationTime(path) else { continue }
+      guard isSessionFile(path), !present.contains(path), let mtime = modificationTime(path) else { continue }
       present.insert(path)
       if let since, mtime < since { continue }
       guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { continue }
@@ -172,7 +148,7 @@ func scrubSessions(_ catalog: Catalog, excluding excluded: String?) throws -> (r
   var skipped = 0
   let cutoff = Date().timeIntervalSince1970 - activeWindow
   let excludedPath = excluded.map(standardPath)
-  for (path, _) in state.files where path != excludedPath {
+  for (path, _) in state.files where path != excludedPath && isSessionFile(path) {
     guard let before = fileIdentity(path), before.mtime < cutoff else {
       skipped += 1
       continue

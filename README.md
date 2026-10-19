@@ -150,7 +150,7 @@ In an interactive session, the agent offers the grant inline, and you confirm wi
 The broker scans saved chat history for credentials that leaked before redaction caught them, or that never passed through the broker.
 
 - **What it finds.** Registered `api-key` and `app-password` values of 8 or more characters, including their base64 and URL-encoded forms, and well-known key formats, such as `sk-`, `sk-ant-`, `sk-or-v1-`, `sk-proj-`, `lin_api_`, `ghp_`, and `xoxb-`. The scan skips obvious placeholders, such as `sk-xxxx` or `sk-your-key-here`. It stores a fingerprint of each unregistered key, never the key.
-- **When it runs.** In the background at Pi startup, on sessions saved since the last scan. It scans Pi's default session folder and every other session folder that Pi has started in. `/cred scan` scans the full history; 10 GB of sessions takes about 3 minutes. The scan state is in `~/.pi/agent/cred/scan.json`, mode 600.
+- **When it runs.** In the background at Pi startup, on sessions saved since the last scan. It reads only `.jsonl` session files: all of them under Pi's default session folder, and the files directly inside any other session folder that Pi has used. `/cred scan` scans the full history; 10 GB of sessions takes about 3 minutes. The scan state is in `~/.pi/agent/cred/scan.json`, mode 600.
 - **How it warns.** Like Pi's notice for a Model Context Protocol server that needs a login, a warning stays visible until you resolve it:
 
 ```

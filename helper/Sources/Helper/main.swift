@@ -570,7 +570,8 @@ func run(_ command: String, _ input: Input) async throws {
 
   case "scrub":
     let state = loadScanState()
-    let count = state.files.keys.filter { $0 != input.exclude }.count
+    let excluded = input.exclude.map(standardPath)
+    let count = state.files.keys.filter { $0 != excluded && isSessionFile($0) }.count
     try Keychain.authenticateOwner(
       reason: "rewrite \(count) saved session files, replacing leaked credential values with [cred-scrubbed:name] markers; sessions changed in the last 10 minutes are skipped")
     let result = try scrubSessions(catalog, excluding: input.exclude)

@@ -165,3 +165,44 @@ public struct LeakScanner: Sendable {
     return Data(text.utf8)
   }
 }
+
+public func standardPath(_ path: String) -> String { (path as NSString).standardizingPath }
+
+public func isSessionFile(_ path: String) -> Bool { path.hasSuffix(".jsonl") }
+
+public func addingSessionRoot(_ candidate: String?, to roots: [String], defaultRoot: String) -> [String] {
+  var kept = roots.filter { $0.hasPrefix("/") && $0 != "/" }
+  guard let candidate, candidate.hasPrefix("/") else { return kept }
+  let root = standardPath(candidate)
+  let isCovered = ([defaultRoot] + kept).contains { root == $0 || root.hasPrefix($0 + "/") }
+  if root != "/" && !isCovered { kept.append(root) }
+  return kept
+}
+
+public struct ScanEntry: Codable, Sendable {
+  public var mtime: Double
+  public var findings: LeakFindings
+  public var firstSeen: [String: Double]?
+
+  static func keys(_ findings: LeakFindings) -> [String] {
+    findings.names.map { "name:" + $0 } + findings.unknown.keys.map { "key:" + $0 }
+      + (findings.registered ?? [:]).keys.map { "key:" + $0 }
+  }
+
+  public init(mtime: Double, findings: LeakFindings, previous: ScanEntry?) {
+    self.mtime = mtime
+    var carried = findings
+    for (fingerprint, owner) in previous?.findings.registered ?? [:] where carried.unknown[fingerprint] != nil {
+      carried.registered = (carried.registered ?? [:]).merging([fingerprint: owner]) { current, _ in current }
+    }
+    self.findings = carried
+    let earlier = previous.map { Set(Self.keys($0.findings)) } ?? []
+    var seen: [String: Double] = [:]
+    for key in Self.keys(carried) {
+      seen[key] = previous?.firstSeen?[key] ?? (earlier.contains(key) ? previous?.mtime : nil) ?? mtime
+    }
+    firstSeen = seen
+  }
+
+  public func seen(_ key: String) -> Double { firstSeen?[key] ?? mtime }
+}

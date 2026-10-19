@@ -39,7 +39,8 @@ function describeEnv(result: EnvResult): string {
 }
 
 function sessionDirectory(ctx: ExtensionContext): { sessionDir?: string } {
-	return { sessionDir: ctx.sessionManager.getSessionDir() };
+	const directory = ctx.sessionManager.getSessionDir();
+	return directory ? { sessionDir: resolve(directory) } : {};
 }
 
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };

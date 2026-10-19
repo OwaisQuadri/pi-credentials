@@ -123,3 +123,24 @@ let catalog = Catalog(
   }
   #expect(scanner.scan(Data("{\"text\":\"plainsk-ant-api03-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5\"}".utf8)).isEmpty)
 }
+
+@Test func scanEntryKeepsFirstSeenWhenRegisteredValueBecomesUnknown() {
+  let fingerprint = "0123456789ab"
+  var before = LeakFindings()
+  before.registered = [fingerprint: "router"]
+  let first = ScanEntry(mtime: 100, findings: before, previous: nil)
+  var after = LeakFindings()
+  after.unknown = [fingerprint: "sk-or-v1-"]
+  let second = ScanEntry(mtime: 500, findings: after, previous: first)
+  #expect(second.seen("key:" + fingerprint) == 100)
+  #expect(second.findings.registered == [fingerprint: "router"])
+}
+
+@Test func sessionRootsRejectEmptyRelativeAndCoveredFolders() {
+  let base = "/Users/u/.pi/agent/sessions"
+  #expect(addingSessionRoot("", to: [], defaultRoot: base).isEmpty)
+  #expect(addingSessionRoot("relative/dir", to: [""], defaultRoot: base).isEmpty)
+  #expect(addingSessionRoot(base + "/--cwd--", to: [], defaultRoot: base).isEmpty)
+  #expect(addingSessionRoot("/tmp/s/", to: [""], defaultRoot: base) == ["/tmp/s"])
+  #expect(isSessionFile("/a/b.jsonl") && !isSessionFile("/a/.env") && !isSessionFile("/a/b.jsonl.pi-credentials-X"))
+}
