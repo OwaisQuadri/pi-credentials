@@ -1,5 +1,10 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { callHelper, describeListing, HelperError, kinds, type Catalog, type Kind } from "./helper.ts";
 
@@ -7,12 +12,119 @@ const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
 	add: "Store a new credential value",
 	register: "Take over an existing Keychain item",
-	edit: "Change a credential's description, kind, hosts, apps, or rotation link",
+	edit: "Change a credential's description, kind, hosts, apps, rotation link, or environment variable",
 	grant: "Let agents use a credential globally or in a project group",
 	revoke: "Remove a grant",
 	group: "Set or remove a project group's Git remote patterns",
 	delete: "Unregister a credential, optionally deleting its Keychain item",
+	env: "Write a .env file with the credentials granted to this project",
 };
+
+interface EnvResult {
+	path: string;
+	variables: string[];
+	unavailable: string[];
+	skipped: string[];
+}
+
+function describeEnv(result: EnvResult): string {
+	return [
+		`Wrote ${result.path} with ${result.variables.join(", ")}.`,
+		result.unavailable.length ? `Could not read: ${result.unavailable.join(", ")}.` : "",
+		result.skipped.length ? `Skipped (under 8 characters): ${result.skipped.join(", ")}.` : "",
+	].filter(Boolean).join(" ");
+}
+
+interface ProcessResult {
+	status: number;
+	stdout: string;
+	stderr: string;
+	isTruncated: boolean;
+	isTimedOut: boolean;
+}
+
+const templateSuffixes = [".example", ".sample", ".template", ".dist"];
+
+function realPath(path: string): string {
+	try { return realpathSync.native(path); }
+	catch { return path; }
+}
+
+const unicodeSpaces = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+export function resolvePiPath(input: string, cwd: string): string | undefined {
+	let text = input.replace(unicodeSpaces, " ");
+	if (text.startsWith("@")) text = text.slice(1);
+	if (text === "~") text = homedir();
+	else if (text.startsWith("~/")) text = join(homedir(), text.slice(2));
+	if (/^file:\/\//.test(text)) {
+		try { text = fileURLToPath(text); }
+		catch { return undefined; }
+	}
+	return isAbsolute(text) ? resolve(text) : resolve(cwd, text);
+}
+
+function isProtectedFile(input: string, cwd: string, agent: string): boolean {
+	const resolved = resolvePiPath(input, cwd);
+	if (resolved === undefined) return true;
+	const full = realPath(resolved).toLowerCase();
+	const base = basename(full);
+	if (base === ".env" || (base.startsWith(".env.") && !templateSuffixes.some((suffix) => base.endsWith(suffix)))) return true;
+	return ["auth.json", "mcp-auth.json"].some((name) => full === join(agent, name));
+}
+
+export function isProtectedPath(input: string, cwd: string): boolean {
+	const agent = agentDirectory();
+	return [input, input.trim(), input.trim().replace(/^file:\/\//i, "file://")].some((form) => isProtectedFile(form, cwd, agent));
+}
+
+function agentDirectory(): string {
+	return realPath(getAgentDir()).toLowerCase();
+}
+
+function ripgrepPath(): string {
+	const bundled = join(getAgentDir(), "bin", "rg");
+	return existsSync(bundled) ? bundled : "rg";
+}
+
+function isInside(file: string, root: string): boolean {
+	return file === root || file.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+const grepProtectedMessage = "pi-credentials refused this grep: it would search a .env file or a Pi auth file. Narrow the path or glob.";
+
+export function grepRefusal(path: string | undefined, glob: string | undefined, cwd: string, timeoutMs = 10_000): Promise<string | undefined> {
+	const root = resolvePiPath(path ?? ".", cwd);
+	if (root === undefined) return Promise.resolve("pi-credentials could not read this path.");
+	if (path !== undefined && isProtectedPath(path, cwd)) return Promise.resolve(grepProtectedMessage);
+	const agent = agentDirectory();
+	const args = ["--files", "--hidden", "--null", "--color=never", "--path-separator", "/", ...(glob === undefined ? [] : ["--glob", glob]), "--", root];
+	return new Promise((done) => {
+		let isSettled = false;
+		let pending = "";
+		const finish = (reason: string | undefined) => {
+			if (isSettled) return;
+			isSettled = true;
+			clearTimeout(timer);
+			child.kill("SIGKILL");
+			done(reason);
+		};
+		const child = spawn(ripgrepPath(), args, { stdio: ["ignore", "pipe", "ignore"] });
+		const timer = setTimeout(() => finish("pi-credentials could not list the files that this grep would search within 10 seconds. Narrow the path or glob."), timeoutMs);
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			const parts = (pending + chunk).split("\0");
+			pending = parts.pop() ?? "";
+			if (parts.some((file) => !isInside(file, root) || isProtectedFile(file, cwd, agent))) finish(grepProtectedMessage);
+		});
+		child.on("error", () => finish("pi-credentials could not run ripgrep to check this grep."));
+		child.on("close", (code) => {
+			if (pending && (!isInside(pending, root) || isProtectedFile(pending, cwd, agent))) finish(grepProtectedMessage);
+			else if (code === 0 || code === 1 || (code === 2 && existsSync(root))) finish(undefined);
+			else finish("ripgrep could not list this path. It may be missing or unreadable.");
+		});
+	});
+}
 
 interface HTTPResponse {
 	status: number;
@@ -28,6 +140,37 @@ const active = new Map<string, number>();
 
 function showActive(ctx: ExtensionContext) {
 	ctx.ui.setStatus("pi-credentials", active.size ? `🔑 ${[...active.keys()].join(", ")}` : undefined);
+}
+
+async function withActive<T>(name: string, ctx: ExtensionContext, run: () => Promise<T>): Promise<T> {
+	active.set(name, (active.get(name) ?? 0) + 1);
+	showActive(ctx);
+	try { return await run(); }
+	finally {
+		const remaining = (active.get(name) ?? 1) - 1;
+		if (remaining > 0) active.set(name, remaining);
+		else active.delete(name);
+		showActive(ctx);
+	}
+}
+
+function describeProcess(result: ProcessResult): string {
+	const stopNote = result.status === -1 ? "Could not stop the command. It may still be running, as root for cred_sudo." : result.isTimedOut ? "Timed out and stopped." : "";
+	const notes = [stopNote, result.isTruncated ? "Output truncated at 1 MB." : ""].filter(Boolean);
+	return [`Exit status ${result.status}`, ...notes, result.stdout && `stdout:\n${result.stdout}`, result.stderr && `stderr:\n${result.stderr}`].filter(Boolean).join("\n");
+}
+
+async function stripCredentialVariables(): Promise<string[]> {
+	const names = Object.keys(process.env).filter((name) => (process.env[name]?.length ?? 0) >= 8);
+	if (!names.length) return [];
+	const separator = `\u0000${randomUUID()}\u0000`;
+	const result = await callHelper<{ text: string; redacted: string[] }>("redact", { text: names.map((name) => process.env[name]).join(separator) }, AbortSignal.timeout(10_000));
+	if (!result.redacted.length) return [];
+	const values = result.text.split(separator);
+	if (values.length !== names.length) return [];
+	const stripped = names.filter((name, index) => values[index] !== process.env[name]);
+	for (const name of stripped) delete process.env[name];
+	return stripped;
 }
 
 async function refresh(cwd: string): Promise<Catalog> {
@@ -49,7 +192,7 @@ function completions(argumentText: string, catalog: Catalog): { value: string; l
 	const [subcommand, name] = parts;
 	if (parts.length === 0) {
 		for (const [label, description] of Object.entries(subcommands)) options.push({ label, description });
-	} else if (parts.length === 1 && subcommand !== "list") {
+	} else if (parts.length === 1 && subcommand !== "list" && subcommand !== "env") {
 		if (subcommand === "group") {
 			for (const [label, patterns] of Object.entries(catalog.groups)) options.push({ label, description: patterns.join(", ") });
 		} else if (subcommand !== "add" && subcommand !== "register") {
@@ -83,12 +226,17 @@ async function askMetadata(ctx: ExtensionContext, kind?: Kind) {
 	const description = await ctx.ui.input("Description", "What is this credential for?");
 	if (!description?.trim()) return undefined;
 	let hosts: string[] = [];
+	let apps: string[] = [];
 	if (selectedKind === "api-key") {
 		const text = await ctx.ui.input("Allowed hosts", "api.example.com, *.example.org (empty means any host)");
 		if (text === undefined) return undefined;
 		hosts = text.split(",").map((host) => host.trim()).filter(Boolean);
+	} else if (selectedKind === "password" || selectedKind === "passcode") {
+		const text = await ctx.ui.input("Apps that may receive it by typing", "Bundle identifiers, such as com.apple.ScreenContinuity (empty means no typing)");
+		if (text === undefined) return undefined;
+		apps = text.split(",").map((app) => app.trim()).filter(Boolean);
 	}
-	return { kind: selectedKind, description: description.trim(), hosts };
+	return { kind: selectedKind, description: description.trim(), hosts, apps };
 }
 
 async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<string | undefined> {
@@ -106,7 +254,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			const choice = await ctx.ui.select(`Credentials · ● usable in this project${catalog.projectGroups.length ? ` (${catalog.projectGroups.join(", ")})` : ""}`, lines);
 			if (!choice) return undefined;
 			const listing = catalog.credentials[lines.indexOf(choice)];
-			return [`${listing.name}: ${listing.description}`, `Kind: ${listing.kind}`, `Hosts: ${listing.hosts.join(", ") || "any"}`, `Apps: ${listing.apps.join(", ") || "any"}`, `Grants: ${listing.grants.join(", ") || "none"}`, listing.rotation ? `Rotate at: ${listing.rotation}` : ""].filter(Boolean).join("\n");
+			return [`${listing.name}: ${listing.description}`, `Kind: ${listing.kind}`, `Hosts: ${listing.hosts.join(", ") || "any"}`, `Apps: ${listing.apps.join(", ") || "none (never typed)"}`, `Grants: ${listing.grants.join(", ") || "none"}`, listing.rotation ? `Rotate at: ${listing.rotation}` : ""].filter(Boolean).join("\n");
 		}
 		case "add": {
 			requireName();
@@ -133,7 +281,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 		case "edit": {
 			const listing = catalog.credentials.find((item) => item.name === requireName());
 			if (!listing) throw new HelperError("unknown-credential", `No credential is named ${name}.`);
-			const field = await ctx.ui.select(`Edit ${name}`, ["description", "kind", "hosts", "apps", "rotation link"]);
+			const field = await ctx.ui.select(`Edit ${name}`, ["description", "kind", "hosts", "apps", "rotation link", "environment variable"]);
 			if (!field) return undefined;
 			const change: Record<string, unknown> = {};
 			if (field === "kind") {
@@ -141,13 +289,14 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 				if (!kind) return undefined;
 				change.kind = kind;
 			} else {
-				const current = field === "hosts" ? listing.hosts.join(", ") : field === "apps" ? listing.apps.join(", ") : field === "description" ? listing.description : listing.rotation ?? "";
-				const text = await ctx.ui.input(`New ${field} (now: ${current || "none"})`, field === "hosts" || field === "apps" ? "comma separated, empty means any" : "");
+				const current = field === "hosts" ? listing.hosts.join(", ") : field === "apps" ? listing.apps.join(", ") : field === "description" ? listing.description : field === "environment variable" ? listing.env : listing.rotation ?? "";
+				const text = await ctx.ui.input(`New ${field} (now: ${current || "none"})`, field === "hosts" ? "comma separated, empty means any host" : field === "apps" ? "comma separated bundle identifiers, empty means never typed" : "");
 				if (text === undefined || (field === "description" && !text.trim())) return undefined;
 				const list = text.split(",").map((item) => item.trim()).filter(Boolean);
 				if (field === "hosts") change.hosts = list;
 				else if (field === "apps") change.apps = list;
 				else if (field === "description") change.description = text.trim();
+				else if (field === "environment variable") change.env = text.trim();
 				else change.rotation = text.trim();
 			}
 			await callHelper("edit", { name, ...change });
@@ -172,15 +321,20 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			await callHelper("delete", { name, isValueDeleted: choice.startsWith("Unregister and") });
 			return `Deleted ${name}.`;
 		}
+		case "env": {
+			const result = await callHelper<EnvResult>("env", { cwd, path: name, session: ctx.sessionManager.getSessionId() });
+			return describeEnv(result);
+		}
 		default:
 			throw new HelperError("unknown-subcommand", `Unknown subcommand ${subcommand}. Use ${Object.keys(subcommands).join(", ")}.`);
 	}
 }
 
-async function offerGrant(name: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<boolean> {
+async function offerGrant(name: string, ctx: ExtensionContext, usableKinds: Kind[], signal?: AbortSignal): Promise<boolean> {
 	if (!ctx.hasUI) return false;
 	const catalog = await refresh(ctx.cwd);
-	if (catalog.credentials.find((item) => item.name === name)?.kind !== "api-key") return false;
+	const kind = catalog.credentials.find((item) => item.name === name)?.kind;
+	if (!kind || !usableKinds.includes(kind)) return false;
 	const scopes = [...catalog.projectGroups, "global"];
 	const choice = await ctx.ui.select(`An agent wants to use ${name}. Grant it?`, [...scopes.map((scope) => `Grant to ${scope}`), "Do not grant"], { signal });
 	if (!choice || choice === "Do not grant") return false;
@@ -191,8 +345,97 @@ async function offerGrant(name: string, ctx: ExtensionContext, signal?: AbortSig
 
 export default function piCredentials(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
-		try { await refresh(ctx.cwd); }
-		catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
+		try {
+			await refresh(ctx.cwd);
+			const stripped = await stripCredentialVariables();
+			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
+		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
+	});
+
+	pi.on("tool_call", async (event, ctx) => {
+		if (!["read", "edit", "grep"].includes(event.toolName)) return undefined;
+		const input = event.input as { path?: unknown; glob?: unknown };
+		const path = typeof input.path === "string" ? input.path : undefined;
+		const glob = event.toolName === "grep" && typeof input.glob === "string" ? input.glob : undefined;
+		if (event.toolName === "grep") {
+			const reason = await grepRefusal(path, glob, ctx.cwd);
+			return reason === undefined ? undefined : { block: true, reason: `${reason} Use cred_list and the cred tools for credentials.` };
+		}
+		if (path === undefined || !isProtectedPath(path, ctx.cwd)) return undefined;
+		return { block: true, reason: "pi-credentials protects .env and Pi auth files. Use cred_list and the cred tools, or cred_env to write a .env file." };
+	});
+
+	async function useCredential<T>(name: string, ctx: ExtensionContext, usableKinds: Kind[], signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+		return withActive(name, ctx, async () => {
+			try { return await run(); }
+			catch (error) {
+				if (!(error instanceof HelperError) || error.code !== "not-granted" || !(await offerGrant(name, ctx, usableKinds, signal))) throw error;
+				return run();
+			}
+		});
+	}
+
+	const base = (ctx: ExtensionContext) => ({ cwd: ctx.cwd, session: ctx.sessionManager.getSessionId() });
+
+	pi.registerTool({
+		name: "cred_type",
+		label: "Type credential",
+		description: "Type a registered password or passcode into a running app, such as a login field or iPhone Mirroring. The helper types it; you never see it. With isActivating (default true) the app comes to the front first; set it false to type into the app in the background.",
+		parameters: Type.Object({
+			name: Type.String({ description: "Registered password or passcode credential." }),
+			app: Type.String({ description: "Running app's bundle identifier or name." }),
+			isActivating: Type.Optional(Type.Boolean()),
+			isReturnPressed: Type.Optional(Type.Boolean({ description: "Press Return after typing." })),
+		}, { additionalProperties: false }),
+		async execute(_id, input, signal, _update, ctx) {
+			const result = await useCredential(input.name, ctx, ["password", "passcode"], signal, () => callHelper<{ typed: string }>("type", { ...base(ctx), ...input }, signal));
+			return { content: [{ type: "text", text: `Typed ${input.name} into ${result.typed}.` }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: "cred_sudo",
+		label: "Run as root",
+		description: "Run one command as root with a registered password. The user approves the exact command with Touch ID each time. Needs a user present.",
+		parameters: Type.Object({
+			name: Type.String({ description: "Registered password credential, such as the Mac login password." }),
+			command: Type.Array(Type.String(), { description: "Program and arguments, without sudo. Not run through a shell.", minItems: 1 }),
+			timeoutSeconds: Type.Optional(Type.Number({ description: "Default 600, at most 3600." })),
+		}, { additionalProperties: false }),
+		async execute(_id, input, signal, _update, ctx) {
+			if (!ctx.hasUI) throw new Error("No user is present to approve a root command. Record the need and continue with other work.");
+			const result = await useCredential(input.name, ctx, ["password"], signal, () => callHelper<ProcessResult>("sudo", { ...base(ctx), name: input.name, arguments: input.command, timeoutSeconds: input.timeoutSeconds }, signal));
+			return { content: [{ type: "text", text: describeProcess(result) }], details: { status: result.status }, isError: result.status !== 0 };
+		},
+	});
+
+	pi.registerTool({
+		name: "cred_notarize",
+		label: "Notarize",
+		description: "Run xcrun notarytool with a registered app-specific password, which the helper supplies on standard input. Pass the notarytool arguments, including --apple-id and --team-id, without --password.",
+		parameters: Type.Object({
+			name: Type.String({ description: "Registered app-password credential." }),
+			arguments: Type.Array(Type.String(), { description: "notarytool subcommand and arguments: submit, info, wait, log, or history.", minItems: 1 }),
+		}, { additionalProperties: false }),
+		async execute(_id, input, signal, _update, ctx) {
+			const result = await useCredential(input.name, ctx, ["app-password"], signal, () => callHelper<ProcessResult>("notarize", { ...base(ctx), ...input }, signal));
+			return { content: [{ type: "text", text: describeProcess(result) }], details: { status: result.status }, isError: result.status !== 0 };
+		},
+	});
+
+	pi.registerTool({
+		name: "cred_env",
+		label: "Write .env",
+		description: "Write a .env file with the api-key and app-password credentials granted to this project, under each credential's variable name from cred_list. Git must ignore the file. You may create it but not read it.",
+		parameters: Type.Object({
+			path: Type.Optional(Type.String({ description: "File named .env or .env.<suffix>, relative to the project. Default .env." })),
+			names: Type.Optional(Type.Array(Type.String(), { description: "Credentials to include. Default: every granted api-key and app-password." })),
+		}, { additionalProperties: false }),
+		async execute(_id, input, signal, _update, ctx) {
+			const result = await callHelper<EnvResult>("env", { ...base(ctx), ...input }, signal);
+			const text = describeEnv(result);
+			return { content: [{ type: "text", text }], details: result };
+		},
 	});
 
 	pi.registerCommand("cred", {
@@ -238,24 +481,11 @@ export default function piCredentials(pi: ExtensionAPI) {
 		}, { additionalProperties: false }),
 		async execute(_id, input, signal, _update, ctx) {
 			const { name, ...request } = input;
-			const send = () => callHelper<HTTPResponse>("request", { name, cwd: ctx.cwd, session: ctx.sessionManager.getSessionId(), request }, signal);
-			active.set(name, (active.get(name) ?? 0) + 1);
-			showActive(ctx);
-			try {
-				let response: HTTPResponse;
-				try { response = await send(); }
-				catch (error) {
-					if (!(error instanceof HelperError) || error.code !== "not-granted" || !(await offerGrant(name, ctx, signal))) throw error;
-					response = await send();
-				}
+			const response = await useCredential(name, ctx, ["api-key"], signal, () => callHelper<HTTPResponse>("request", { ...base(ctx), name, request }, signal));
+			{
 				const notes = [response.isTruncated ? "Body truncated at 1 MB." : "", response.unavailable.length ? `Could not check output for: ${response.unavailable.join(", ")}.` : ""].filter(Boolean);
 				const text = [`HTTP ${response.status}${response.contentType ? ` · ${response.contentType}` : ""}`, ...notes, "", response.body].join("\n");
 				return { content: [{ type: "text", text }], details: { status: response.status, redacted: response.redacted } };
-			} finally {
-				const remaining = (active.get(name) ?? 1) - 1;
-				if (remaining > 0) active.set(name, remaining);
-				else active.delete(name);
-				showActive(ctx);
 			}
 		},
 	});

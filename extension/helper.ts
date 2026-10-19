@@ -13,6 +13,7 @@ export interface Listing {
 	hosts: string[];
 	apps: string[];
 	rotation?: string;
+	env: string;
 	grants: string[];
 	isGranted: boolean;
 }
