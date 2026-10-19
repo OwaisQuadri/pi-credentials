@@ -1,10 +1,11 @@
 import CredentialsCore
+import Darwin
 import Foundation
 
 struct Input: Decodable {
   var name: String?
   var scope: String?
-  var remotes: [String]?
+  var cwd: String?
   var service: String?
   var account: String?
   var value: String?
@@ -43,34 +44,56 @@ func required<T>(_ value: T?, _ field: String) throws -> T {
   return value
 }
 
-func logUse(_ input: Input, action: String, target: String, result: String) {
+func remotes(at directory: String?) -> [String] {
+  guard let directory else { return [] }
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+  process.arguments = ["-C", directory, "remote", "-v"]
+  let pipe = Pipe()
+  process.standardOutput = pipe
+  process.standardError = FileHandle.nullDevice
+  guard (try? process.run()) != nil else { return [] }
+  let data = pipe.fileHandleForReading.readDataToEndOfFile()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0 else { return [] }
+  let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
+  return Array(Set(lines.compactMap { $0.split(separator: "\t").dropFirst().first }
+    .map { String($0.split(separator: " ").first ?? "") }))
+}
+
+func logUse(_ input: Input, groups: [String], action: String, target: String, result: String) {
   let root =
     ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"]
     ?? NSHomeDirectory() + "/.pi/agent"
-  let directory = URL(fileURLWithPath: root).appendingPathComponent("cred")
-  try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-  let file = directory.appendingPathComponent("usage.jsonl")
+  let directory = root + "/cred"
+  mkdir(directory, 0o700)
   let entry: [String: String] = [
     "time": ISO8601DateFormatter().string(from: Date()), "credential": input.name ?? "",
-    "action": action, "target": target, "remotes": (input.remotes ?? []).joined(separator: " "),
+    "action": action, "target": target, "groups": groups.joined(separator: " "),
     "session": input.session ?? "", "result": result,
   ]
   guard var line = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys])
   else { return }
-  line.append(Data("\n".utf8))
-  if let handle = try? FileHandle(forWritingTo: file) {
-    _ = try? handle.seekToEnd()
-    try? handle.write(contentsOf: line)
-    try? handle.close()
-  } else {
-    try? line.write(to: file)
-  }
+  line.append(UInt8(ascii: "\n"))
+  let descriptor = open(directory + "/usage.jsonl", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
+  guard descriptor >= 0 else { return }
+  defer { close(descriptor) }
+  fchmod(descriptor, 0o600)
+  _ = line.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
 }
 
-func allValues(_ catalog: Catalog) -> [(name: String, value: String)] {
-  catalog.credentials.sorted { $0.key < $1.key }.compactMap { name, credential in
-    (try? Keychain.value(of: credential)).map { (name, $0) }
+func redactionValues(_ catalog: Catalog) -> (values: [(name: String, value: String)], unavailable: [String]) {
+  var values: [(String, String)] = []
+  var unavailable: [String] = []
+  for (name, credential) in catalog.credentials.sorted(by: { $0.key < $1.key })
+  where Redactor.redactedKinds.contains(credential.kind) {
+    if let value = try? Keychain.value(of: credential) {
+      values.append((name, value))
+    } else {
+      unavailable.append(name)
+    }
   }
+  return (values, unavailable)
 }
 
 func applyMetadata(_ input: Input, to credential: inout Credential) {
@@ -81,26 +104,29 @@ func applyMetadata(_ input: Input, to credential: inout Credential) {
   if let rotation = input.rotation { credential.rotation = rotation.isEmpty ? nil : rotation }
 }
 
+func summary(_ credential: Credential) -> String {
+  let hosts = credential.hosts.isEmpty ? "any host" : credential.hosts.joined(separator: ", ")
+  return "\(credential.kind.rawValue), \(credential.kind == .apiKey ? hosts : "no hosts")"
+}
+
 func run(_ command: String, _ input: Input) async throws {
   var catalog = try Keychain.loadCatalog()
-  let remotes = input.remotes ?? []
+  let projectRemotes = remotes(at: input.cwd)
+  let projectGroups = catalog.groups(forRemotes: projectRemotes)
   switch command {
   case "list":
     let listings = catalog.credentials.sorted { $0.key < $1.key }.map { name, credential in
       Listing(
         name: name, description: credential.description, kind: credential.kind,
         hosts: credential.hosts, apps: credential.apps, rotation: credential.rotation,
-        grants: credential.grants, isGranted: catalog.isGranted(name, remotes: remotes))
+        grants: credential.grants, isGranted: catalog.isGranted(name, remotes: projectRemotes))
     }
     struct Output: Encodable {
       var credentials: [Listing]
       var groups: [String: [String]]
       var projectGroups: [String]
     }
-    emit(
-      Output(
-        credentials: listings, groups: catalog.groups,
-        projectGroups: catalog.groups(forRemotes: remotes)))
+    emit(Output(credentials: listings, groups: catalog.groups, projectGroups: projectGroups))
 
   case "register", "add":
     let name = try required(input.name, "name")
@@ -112,10 +138,17 @@ func run(_ command: String, _ input: Input) async throws {
       description: try required(input.description, "description"),
       kind: try required(input.kind, "kind"), service: "")
     applyMetadata(input, to: &credential)
-    try Keychain.authenticateOwner(reason: "add the credential '\(name)' to pi-credentials")
     if command == "register" {
       let service = try required(input.service, "service")
-      let account = try Keychain.resolveAccount(service: service, account: input.account)
+      let account: String
+      do {
+        account = try Keychain.resolveAccount(service: service, account: input.account)
+      } catch let error as CredentialError where error.code == "keychain-missing" {
+        account = try Keychain.resolveAccount(
+          service: "pi-credentials.staging." + service, account: input.account)
+      }
+      try Keychain.authenticateOwner(
+        reason: "take over Keychain item '\(service)' (account '\(account)') as '\(name)': \(summary(credential))")
       try Keychain.adopt(service: service, account: account)
       credential.service = service
       credential.account = account
@@ -124,6 +157,7 @@ func run(_ command: String, _ input: Input) async throws {
       guard !value.isEmpty else { throw CredentialError("missing-field", "Provide a value.") }
       credential.service = input.service ?? "pi-credentials/\(name)"
       credential.account = name
+      try Keychain.authenticateOwner(reason: "store a new credential '\(name)': \(summary(credential))")
       try Keychain.add(service: credential.service, account: name, data: Data(value.utf8))
     }
     catalog.credentials[name] = credential
@@ -132,9 +166,22 @@ func run(_ command: String, _ input: Input) async throws {
 
   case "edit":
     let name = try required(input.name, "name")
-    var credential = try catalog.credential(name)
+    let before = try catalog.credential(name)
+    var credential = before
     applyMetadata(input, to: &credential)
-    try Keychain.authenticateOwner(reason: "edit the credential '\(name)'")
+    var changes: [String] = []
+    if before.kind != credential.kind { changes.append("kind \(before.kind.rawValue) → \(credential.kind.rawValue)") }
+    if before.hosts != credential.hosts {
+      changes.append("hosts [\(before.hosts.joined(separator: ", "))] → [\(credential.hosts.joined(separator: ", "))]" + (credential.hosts.isEmpty ? " (any host)" : ""))
+    }
+    if before.apps != credential.apps {
+      changes.append("apps [\(before.apps.joined(separator: ", "))] → [\(credential.apps.joined(separator: ", "))]")
+    }
+    if before.description != credential.description || before.rotation != credential.rotation {
+      changes.append("description or rotation link")
+    }
+    try Keychain.authenticateOwner(
+      reason: "edit '\(name)': \(changes.isEmpty ? "no changes" : changes.joined(separator: "; "))")
     catalog.credentials[name] = credential
     try Keychain.saveCatalog(catalog)
     emit(["edited": name])
@@ -146,8 +193,11 @@ func run(_ command: String, _ input: Input) async throws {
     guard scope == Catalog.globalScope || catalog.groups[scope] != nil else {
       throw CredentialError("unknown-scope", "Use 'global' or a defined project group.")
     }
-    let verb = command == "grant" ? "grant '\(name)' to \(scope)" : "revoke '\(name)' from \(scope)"
-    try Keychain.authenticateOwner(reason: verb)
+    let target = scope == Catalog.globalScope
+      ? "every project"
+      : "project group '\(scope)' (\(catalog.groups[scope, default: []].joined(separator: ", ")))"
+    try Keychain.authenticateOwner(
+      reason: command == "grant" ? "let agents use '\(name)' (\(summary(credential))) in \(target)" : "stop agents using '\(name)' in \(target)")
     credential.grants.removeAll { $0 == scope }
     if command == "grant" { credential.grants.append(scope) }
     catalog.credentials[name] = credential
@@ -161,8 +211,11 @@ func run(_ command: String, _ input: Input) async throws {
       throw CredentialError("invalid-name", "'global' is reserved.")
     }
     let patterns = try required(input.patterns, "patterns").compactMap(Catalog.normalizeRemote)
+    let users = catalog.credentials.filter { $0.value.grants.contains(name) }.keys.sorted()
     try Keychain.authenticateOwner(
-      reason: patterns.isEmpty ? "remove the project group '\(name)'" : "set the project group '\(name)'")
+      reason: patterns.isEmpty
+        ? "remove project group '\(name)' and its grants"
+        : "set project group '\(name)' to \(patterns.joined(separator: ", ")); granted: \(users.isEmpty ? "none" : users.joined(separator: ", "))")
     if patterns.isEmpty {
       catalog.groups[name] = nil
       for key in catalog.credentials.keys { catalog.credentials[key]?.grants.removeAll { $0 == name } }
@@ -177,7 +230,9 @@ func run(_ command: String, _ input: Input) async throws {
     let credential = try catalog.credential(name)
     let isValueDeleted = input.isValueDeleted ?? false
     try Keychain.authenticateOwner(
-      reason: isValueDeleted ? "delete '\(name)' and its Keychain value" : "unregister '\(name)'")
+      reason: isValueDeleted
+        ? "delete '\(name)' and its Keychain item '\(credential.service)'"
+        : "unregister '\(name)' and keep Keychain item '\(credential.service)'")
     if isValueDeleted {
       let account = try credential.account ?? Keychain.resolveAccount(service: credential.service, account: nil)
       try Keychain.delete(service: credential.service, account: account)
@@ -188,36 +243,48 @@ func run(_ command: String, _ input: Input) async throws {
 
   case "request":
     let name = try required(input.name, "name")
-    let credential = try catalog.credential(name)
-    guard catalog.isGranted(name, remotes: remotes) else {
-      throw CredentialError(
-        "not-granted",
-        "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: remotes))")
+    let host = (try? required(input.request, "request")).flatMap { URL(string: $0.url)?.host } ?? "?"
+    func refuse(_ error: CredentialError) -> CredentialError {
+      logUse(input, groups: projectGroups, action: "request", target: host, result: error.code)
+      return error
+    }
+    guard let credential = catalog.credentials[name] else {
+      throw refuse(CredentialError("unknown-credential", "No registered credential is named '\(name)'."))
+    }
+    guard catalog.isGranted(name, remotes: projectRemotes) else {
+      throw refuse(
+        CredentialError(
+          "not-granted",
+          "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes))"))
     }
     guard credential.kind == .apiKey else {
-      throw CredentialError("wrong-kind", "'\(name)' is a \(credential.kind.rawValue), not an api-key.")
+      throw refuse(CredentialError("wrong-kind", "'\(name)' is a \(credential.kind.rawValue), not an api-key."))
     }
     let request = try required(input.request, "request")
-    let host = URL(string: request.url)?.host ?? "?"
     do {
       let value = try Keychain.value(of: credential)
+      let redaction = redactionValues(catalog)
       let response = try await Requester.send(
         request, credential: credential, value: value,
-        redactor: Redactor(values: allValues(catalog)))
-      logUse(input, action: "request", target: host, result: String(response.status))
+        redactor: Redactor(values: redaction.values + [(name, value)]), unavailable: redaction.unavailable)
+      logUse(input, groups: projectGroups, action: "request", target: host, result: String(response.status))
       emit(response)
+    } catch let error as CredentialError {
+      throw refuse(error)
     } catch {
-      logUse(input, action: "request", target: host, result: "error")
+      logUse(input, groups: projectGroups, action: "request", target: host, result: "error")
       throw error
     }
 
   case "redact":
-    let result = Redactor(values: allValues(catalog)).redact(try required(input.text, "text"))
+    let redaction = redactionValues(catalog)
+    let result = Redactor(values: redaction.values).redact(try required(input.text, "text"))
     struct Output: Encodable {
       var text: String
       var redacted: [String]
+      var unavailable: [String]
     }
-    emit(Output(text: result.text, redacted: result.names))
+    emit(Output(text: result.text, redacted: result.names, unavailable: redaction.unavailable))
 
   default:
     throw CredentialError("unknown-command", "Unknown command '\(command)'.")

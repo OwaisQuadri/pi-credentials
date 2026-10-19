@@ -4,8 +4,8 @@ cd "${0:A:h:h}"
 swift build -c release -Xswiftc -warnings-as-errors
 binary="$(swift build -c release --show-bin-path)/pi-credentials-helper"
 identity=${PI_CREDENTIALS_SIGNING_IDENTITY:-}
-if [[ -z "$identity" ]] && security find-identity -p codesigning -v | grep -q 'Developer ID Application'; then
-  identity='Developer ID Application'
+if [[ -z "$identity" ]]; then
+  identity=$(security find-identity -p codesigning -v | awk '/Developer ID Application/ {print $2; exit}')
 fi
 if [[ -n "$identity" ]]; then
   codesign -f -s "$identity" -i dev.pi-credentials.helper -o runtime "$binary"

@@ -74,20 +74,62 @@ public enum Keychain {
     }
   }
 
-  public static func add(service: String, account: String, data: Data) throws {
+  static let copiedAttributes = [
+    kSecAttrLabel as String, kSecAttrComment as String, kSecAttrDescription as String,
+    kSecAttrGeneric as String,
+  ]
+
+  public static func add(
+    service: String, account: String, data: Data, attributes: [String: Any] = [:]
+  ) throws {
     var query = baseQuery(service: service, account: account)
+    for key in copiedAttributes { query[key] = attributes[key] }
     query[kSecValueData as String] = data
     let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecDuplicateItem {
+      throw CredentialError(
+        "keychain-exists",
+        "A Keychain item already uses service '\(service)'. Register it instead of adding a new value.")
+    }
     guard status == errSecSuccess else { throw failure(status, "Add '\(service)'") }
   }
 
+  static func attributes(service: String, account: String) throws -> [String: Any] {
+    var query = baseQuery(service: service, account: account)
+    query[kSecReturnAttributes as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    guard status == errSecSuccess, let attributes = result as? [String: Any] else {
+      throw failure(status, "Inspect '\(service)'")
+    }
+    return attributes
+  }
+
   public static func adopt(service: String, account: String) throws {
-    let value = try read(service: service, account: account)
     let staging = stagingPrefix + service
-    try delete(service: staging, account: account)
-    try add(service: staging, account: account, data: value)
+    let isRecovering: Bool
+    do {
+      _ = try attributes(service: service, account: account)
+      isRecovering = false
+    } catch let error as CredentialError where error.code == "keychain-missing" {
+      isRecovering = true
+    }
+    let source = isRecovering ? staging : service
+    let attributes = try attributes(service: source, account: account)
+    let value = try read(service: source, account: account)
+    if !isRecovering {
+      try delete(service: staging, account: account)
+      try add(service: staging, account: account, data: value, attributes: attributes)
+    }
     try delete(service: service, account: account)
-    try add(service: service, account: account, data: value)
+    do {
+      try add(service: service, account: account, data: value, attributes: attributes)
+    } catch {
+      throw CredentialError(
+        "adopt-incomplete",
+        "The value is safe in Keychain item '\(staging)'. Run register again to finish.")
+    }
     try delete(service: staging, account: account)
   }
 

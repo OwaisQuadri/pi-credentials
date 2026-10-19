@@ -1,24 +1,47 @@
 import Foundation
 
 public struct Redactor: Sendable {
-  public static let minimumLength = 4
+  public static let minimumLength = 8
+  public static let redactedKinds: Set<Kind> = [.apiKey, .appPassword]
 
   let forms: [(text: String, label: String)]
 
   public init(values: [(name: String, value: String)]) {
     var forms: [(String, String)] = []
+    var unreserved = CharacterSet.alphanumerics
+    unreserved.insert(charactersIn: "-._~")
     for (name, value) in values where value.count >= Self.minimumLength {
       let label = "[cred:\(name)]"
       let base64 = Data(value.utf8).base64EncodedString()
       let unpadded = base64.trimmingCharacters(in: CharacterSet(charactersIn: "="))
       let urlSafe = unpadded.replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_")
-      let percent = value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
-      for form in [value, base64, unpadded, urlSafe, percent] {
-        forms.append((form, label))
-      }
+      let percent = value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
+      let candidates = [
+        value, base64, unpadded, urlSafe, percent, Self.lowercaseEscapes(percent),
+        percent.replacingOccurrences(of: "%20", with: "+"),
+        value.replacingOccurrences(of: "/", with: "\\/"),
+      ]
+      for form in Set(candidates) { forms.append((form, label)) }
     }
     self.forms = forms.sorted { $0.0.count > $1.0.count }
+  }
+
+  static func lowercaseEscapes(_ text: String) -> String {
+    var output = ""
+    var remaining = 0
+    for character in text {
+      if character == "%" {
+        remaining = 2
+        output.append(character)
+      } else if remaining > 0 {
+        remaining -= 1
+        output.append(Character(character.lowercased()))
+      } else {
+        output.append(character)
+      }
+    }
+    return output
   }
 
   public func redact(_ text: String) -> (text: String, names: [String]) {
