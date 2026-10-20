@@ -332,10 +332,10 @@ async function runCommand(argumentText: string, ctx: ExtensionContext, pi: Exten
 				else if (field === "environment variable") change.env = text.trim();
 				else change.rotation = text.trim();
 			}
-			const wasLeaked = leakReport.leaks.some((leak) => leak.name === name);
+			const isLeakedBefore = leakReport.leaks.some((leak) => leak.name === name);
 			const result = await callHelper<{ report: LeakReport }>("edit", { name, ...change });
 			setLeakReport(result.report);
-			if (field === "value" && wasLeaked && !result.report.leaks.some((leak) => leak.name === name)) return `Edited ${name}. Its leak warnings are resolved.`;
+			if (field === "value" && isLeakedBefore && !result.report.leaks.some((leak) => leak.name === name)) return `Edited ${name}. Its leak warnings are resolved.`;
 			return `Edited ${name}.`;
 		}
 		case "grant":
