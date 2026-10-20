@@ -136,5 +136,5 @@ test("cred_ask saves a secret handle once and refuses unknown handles", async ()
 	const result = await tools.cred_ask.execute("fixture", input, undefined, undefined, ctx);
 	assert.equal(JSON.parse(readFileSync(join(directory, "add.json"), "utf8")).value, "handle-value-123");
 	assert.doesNotMatch(JSON.stringify(result), /handle-value-123/);
-	await assert.rejects(tools.cred_ask.execute("fixture", input, undefined, undefined, ctx), /Unknown secret handle/);
+	await assert.rejects(tools.cred_ask.execute("fixture", input, undefined, undefined, ctx), /already used secret handle/);
 });
