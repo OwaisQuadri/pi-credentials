@@ -130,7 +130,7 @@ func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
       known[name] = (current.count + 1, max(current.last, entry.mtime))
     }
     for (fingerprint, prefix) in entry.findings.unknown {
-      if let owner = entry.findings.registered?[fingerprint], catalog.credentials[owner] != nil, current[owner] != nil { continue }
+      if let owner = entry.findings.registered?[fingerprint], current[owner] != nil { continue }
       if let dismissed = catalog.dismissed?[fingerprint], entry.seen("key:" + fingerprint) < dismissed { continue }
       let current = unknown[fingerprint] ?? (prefix, 0, 0)
       unknown[fingerprint] = (prefix, current.count + 1, max(current.last, entry.mtime))

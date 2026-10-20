@@ -156,8 +156,8 @@ The broker scans saved chat history for credentials that leaked before redaction
 ```
 ⚠ 2 Known and 27 Unknown credentials leaked in chat history.
   Known:
-  - openrouter
   - linear
+  - openrouter
 
   register credentials with `/cred register` or `/cred add`
   use `/cred scrub` to clean the chat history of credentials
