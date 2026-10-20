@@ -2,7 +2,7 @@
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
-Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, the read block for `.env` and Pi auth files, leak warnings with `/cred scan | rotated | scrub`, and last use in `/cred list` work. These parts of the design are not built yet: one-time values and `{{secret:…}}` handles, and the input mask toggle.
+Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, the read block for `.env` and Pi auth files, leak warnings with `/cred scan | rotated | scrub`, last use in `/cred list`, and saving a `{{secret:…}}` handle from `pi-ask-user` work. One-time use of a handle without saving it is not built yet.
 
 ## Install
 
@@ -124,9 +124,8 @@ ln -s <package directory>/scripts/cred.zsh ~/.local/bin/cred
 Two routes bring a new secret in. Neither shows the value to the model.
 
 1. **You start it.** `/cred add <name>` opens an input box.
-2. **The agent starts it.** `cred_ask(name, reason)` opens the same input box mid-task. If `pi-ask-user` is installed, its secure field does the same inside a richer prompt and hands the value to this package through Pi's in-process event bus.
-
-The input shows text by default, with a mask toggle. You can use the value once or save it. A one-time value returns to the model as a session handle, such as `{{secret:3f9a}}`, that only broker actions accept. Saving requires Touch ID.
+2. **The agent starts it.** `cred_ask(name, reason)` opens the same input box mid-task.
+3. **The agent asks with `pi-ask-user`.** `ask_user_question` with `secure: true` shows the value by default, and Ctrl+T masks it. The model gets only a session handle, such as `{{secret:3f9a01bc}}`. `pi-ask-user` hands the value to this package through Pi's in-process event bus. `cred_ask` with `secret: <handle>` then saves it without asking again. Saving requires Touch ID. Handles end with the Pi session.
 
 ## Missing access
 

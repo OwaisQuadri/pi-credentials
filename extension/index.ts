@@ -50,6 +50,7 @@ function sessionFile(ctx: ExtensionContext): string | undefined {
 }
 
 let currentRun = "";
+const secretHandles = new Map<string, string>();
 
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };
 
@@ -582,6 +583,12 @@ export default function piCredentials(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.events.on("ask-user-question:secret", (payload) => {
+		const { handle, value } = (payload ?? {}) as { handle?: unknown; value?: unknown };
+		if (typeof handle === "string" && typeof value === "string") secretHandles.set(handle, value);
+	});
+	pi.on("session_shutdown", () => secretHandles.clear());
+
 	pi.registerTool({
 		name: "cred_ask",
 		label: "Ask for a credential",
@@ -592,11 +599,15 @@ export default function piCredentials(pi: ExtensionAPI) {
 			kind: Type.Union(kinds.map((kind) => Type.Literal(kind))),
 			description: Type.String({ description: "What the credential is for, kept in the catalog." }),
 			hosts: Type.Optional(Type.Array(Type.String(), { description: "Allowed hosts for an api-key." })),
+			secret: Type.Optional(Type.String({ description: "A {{secret:…}} handle from ask_user_question with secure: true. Saves that value instead of asking again." })),
 		}, { additionalProperties: false }),
 		async execute(_id, input, signal, _update, ctx) {
 			if (!ctx.hasUI) throw new Error("No user is present to enter a credential. Record the need and continue with other work.");
 			if (!input.description.trim()) throw new Error("Give a description of what the credential is for.");
-			const value = await ctx.ui.input(`${input.reason} · value for ${input.name} (${input.kind})`, "Paste the secret, or press Escape to decline", { signal });
+			if (input.secret !== undefined && !secretHandles.has(input.secret)) throw new Error("Unknown secret handle. Handles last for this Pi session only; ask the user again with ask_user_question secure: true.");
+			const value = input.secret !== undefined
+				? secretHandles.get(input.secret)
+				: await ctx.ui.input(`${input.reason} · value for ${input.name} (${input.kind})`, "Paste the secret, or press Escape to decline", { signal });
 			if (!value) throw new Error("The user declined to enter the credential.");
 			await callHelper("add", { name: input.name, value, kind: input.kind, description: input.description.trim(), hosts: input.hosts ?? [] });
 			await refresh(ctx.cwd);
