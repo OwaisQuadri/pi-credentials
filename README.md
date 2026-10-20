@@ -151,7 +151,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 
 - **What it finds.** Registered `api-key` and `app-password` values of 8 or more characters, including their base64 and URL-encoded forms, and well-known key formats, such as `sk-`, `sk-ant-`, `sk-or-v1-`, `sk-proj-`, `lin_api_`, `ghp_`, and `xoxb-`. The scan skips obvious placeholders, such as `sk-xxxx` or `sk-your-key-here`. It stores a fingerprint of each unregistered key, never the key.
 - **When it runs.** In the background at Pi startup, on sessions saved since the last scan. After you add, change, or delete a registered value, the next startup scan reads every session again. It reads only `.jsonl` session files: all of them under Pi's default session folder, and the files directly inside any other session folder that Pi has used. `/cred scan` scans the full history; 10 GB of sessions takes about 3 minutes. The scan state is in `~/.pi/agent/cred/scan.json`, mode 600.
-- **How it warns.** Like Pi's package update notice, a warning appears at the start of each conversation until you resolve it. The model does not see it:
+- **How it warns.** Like Pi's package update notice, a warning appears in the conversation each time Pi starts, reloads, or resumes a session, until you resolve it. Only the newest warning is drawn, and the model does not see it:
 
 ```
 ⚠ 2 Known and 27 Unknown credentials leaked in chat history.
