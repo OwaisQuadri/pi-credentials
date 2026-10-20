@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -10,6 +10,9 @@ const fake = join(directory, "helper");
 writeFileSync(fake, `#!/bin/sh
 input=$(cat)
 case "$1" in
+  request)
+    printf '%s' "$input" > "${directory}/request.json"
+    printf '%s' "$input" | /usr/bin/python3 -c 'import json,sys; r=json.load(sys.stdin)["request"]; p=r.get("outputFile"); print(json.dumps({"error":{"code":"output-file-refused","message":"Existing paths are refused."}} if p=="existing" else {"status":200,"body":"NEVER_RETURN","isTruncated":False,"redacted":[],"unavailable":[]} if p=="legacy" else {"status":200,"contentType":"application/octet-stream","outputFile":p,"byteCount":1000001,"body":"NEVER_RETURN","isTruncated":False,"redacted":[],"unavailable":[]} if p else {"status":200,"body":"text response","isTruncated":False,"redacted":[],"unavailable":[]}))' ;;
   list) echo '{"credentials":[{"name":"key","description":"","kind":"api-key","hosts":[],"apps":[],"grants":[],"isGranted":false}],"groups":{},"projectGroups":[]}' ;;
   redact)
     [ -e "${directory}/broken" ] && exit 1
@@ -21,13 +24,14 @@ process.env.PI_CREDENTIALS_HELPER = fake;
 
 type Handler = (event: unknown, ctx: unknown) => Promise<any>;
 const handlers: Record<string, Handler> = {};
+const tools: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
 const { default: extension } = await import("./index.ts");
 extension({
 	on: (name: string, handler: Handler) => { handlers[name] = handler; },
 	registerCommand: () => undefined,
 	registerEntryRenderer: () => undefined,
 	appendEntry: () => undefined,
-	registerTool: () => undefined,
+	registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { tools[tool.name] = tool; },
 } as never);
 
 test("credential variables leave the Pi process and protected files stay unread", async () => {
@@ -77,6 +81,22 @@ test("credential variables leave the Pi process and protected files stay unread"
 		assert.equal(await handlers.tool_call({ toolName: "read", input: { path } }, ctx), undefined, path);
 	}
 	delete process.env.PI_CODING_AGENT_DIR;
+});
+
+test("cred_request forwards outputFile and returns only file metadata", async () => {
+	const ctx = { cwd: directory, sessionManager: { getSessionId: () => "fixture-session" }, ui: { setStatus: () => undefined } };
+	const input = { name: "key", method: "POST", url: "https://api.example.test/media", body: "fixture", outputFile: "media.bin" };
+	const result = await tools.cred_request.execute("fixture", input, undefined, undefined, ctx);
+	const forwarded = JSON.parse(readFileSync(join(directory, "request.json"), "utf8"));
+	assert.deepEqual(forwarded, { cwd: directory, session: "fixture-session", name: "key", request: { method: input.method, url: input.url, body: input.body, outputFile: input.outputFile } });
+	assert.deepEqual(result.details, { status: 200, contentType: "application/octet-stream", outputFile: "media.bin", byteCount: 1000001, redacted: [] });
+	assert.match(result.content[0].text, /Saved 1000001 bytes to media.bin/);
+	assert.doesNotMatch(JSON.stringify(result), /NEVER_RETURN/);
+	await assert.rejects(tools.cred_request.execute("fixture", { ...input, outputFile: "existing" }, undefined, undefined, ctx), /Existing paths are refused/);
+	await assert.rejects(tools.cred_request.execute("fixture", { ...input, outputFile: "legacy" }, undefined, undefined, ctx), /helper did not confirm a saved file/);
+	const text = await tools.cred_request.execute("fixture", { name: "key", method: "GET", url: input.url }, undefined, undefined, ctx);
+	assert.match(text.content[0].text, /text response/);
+	assert.deepEqual(text.details, { status: 200, redacted: [] });
 });
 
 test("tool output never reaches the model with a registered key in it", async () => {

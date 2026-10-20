@@ -19,6 +19,7 @@ final class Cancellation: @unchecked Sendable {
   private let lock = NSLock()
   private var isCancelledValue = false
   private var isExitAllowedValue = true
+  private var requestCancellation: (@Sendable () -> Void)?
 
   var isCancelled: Bool {
     lock.lock()
@@ -30,8 +31,29 @@ final class Cancellation: @unchecked Sendable {
     lock.lock()
     isCancelledValue = true
     let isExitAllowed = isExitAllowedValue
+    let cancelRequest = requestCancellation
     lock.unlock()
+    cancelRequest?()
     if isExitAllowed { _exit(130) }
+  }
+
+  private func setRequestCancellation(_ action: (@Sendable () -> Void)?, isExitAllowed: Bool) {
+    lock.lock()
+    isExitAllowedValue = isExitAllowed
+    requestCancellation = action
+    let isCancelled = isCancelledValue
+    lock.unlock()
+    if isCancelled { action?() }
+  }
+
+  func guardedRequest<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws
+    -> T
+  {
+    setRequestCancellation(nil, isExitAllowed: false)
+    defer { setRequestCancellation(nil, isExitAllowed: true) }
+    let task = Task { try await body() }
+    setRequestCancellation({ task.cancel() }, isExitAllowed: false)
+    return try await task.value
   }
 
   func guarded<T>(_ body: () throws -> T) rethrows -> T {

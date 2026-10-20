@@ -9,10 +9,14 @@ public struct Redactor: Sendable {
   public var longestForm: Int { forms.map { $0.text.utf8.count }.max() ?? 0 }
 
   public init(values: [(name: String, value: String)]) {
+    self.init(values: values, minimumLength: Self.minimumLength)
+  }
+
+  init(values: [(name: String, value: String)], minimumLength: Int) {
     var forms: [(String, String)] = []
     let unreserved = CharacterSet(
       charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-    for (name, value) in values where value.count >= Self.minimumLength {
+    for (name, value) in values where !value.isEmpty && value.count >= minimumLength {
       let label = "[cred:\(name)]"
       let base64 = Data(value.utf8).base64EncodedString()
       let unpadded = base64.trimmingCharacters(in: CharacterSet(charactersIn: "="))
@@ -50,7 +54,9 @@ public struct Redactor: Sendable {
     return output
   }
 
-  public func redact(_ text: String, labelPrefix: String = "cred") -> (text: String, names: [String]) {
+  public func redact(_ text: String, labelPrefix: String = "cred") -> (
+    text: String, names: [String]
+  ) {
     var output = text
     var names: [String] = []
     for (form, label) in forms where output.contains(form) {
