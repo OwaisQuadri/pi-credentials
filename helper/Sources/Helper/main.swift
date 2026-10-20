@@ -190,7 +190,7 @@ func summary(_ credential: Credential) -> String {
 }
 
 func run(_ command: String, _ input: Input) async throws {
-  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete", "rotate", "scrub"]
+  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete", "rotated", "scrub"]
     .contains(command)
   if isMutating { try lockCatalog() }
   var catalog = try Keychain.loadCatalog()
@@ -314,7 +314,11 @@ func run(_ command: String, _ input: Input) async throws {
     }
     catalog.credentials[name] = credential
     try Keychain.saveCatalog(catalog)
-    emit(["edited": name])
+    struct Output: Encodable {
+      var edited: String
+      var report: LeakReport
+    }
+    emit(Output(edited: name, report: report(loadScanState(), catalog: catalog, scanned: 0)))
 
   case "grant", "revoke":
     let name = try required(input.name, "name")
@@ -546,11 +550,15 @@ func run(_ command: String, _ input: Input) async throws {
     let result = try scanSessions(catalog, isFull: input.isFull ?? false, extraRoot: input.sessionDir)
     emit(report(result.state, catalog: catalog, scanned: result.scanned))
 
-  case "rotate":
+  case "rotated":
     let name = try required(input.name, "name")
     let now = Date().timeIntervalSince1970
     if name == "all" {
       let current = report(loadScanState(), catalog: catalog, scanned: 0)
+      guard !current.leaks.isEmpty || !current.unknown.isEmpty else {
+        emit(current)
+        return
+      }
       try Keychain.authenticateOwner(
         reason:
           "clear all \(current.leaks.count) known and \(current.unknown.count) unknown leak warnings for sessions saved before now")

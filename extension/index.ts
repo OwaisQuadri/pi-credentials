@@ -12,14 +12,14 @@ const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
 	add: "Store a new credential value",
 	register: "Take over an existing Keychain item",
-	edit: "Change a credential's description, kind, hosts, apps, rotation link, or environment variable",
+	edit: "Change a credential's value, description, kind, hosts, apps, rotation link, or environment variable",
 	grant: "Let agents use a credential globally or in a project group",
 	revoke: "Remove a grant",
 	group: "Set or remove a project group's Git remote patterns",
 	delete: "Unregister a credential, optionally deleting its Keychain item",
 	env: "Write a .env file with the credentials granted to this project",
 	scan: "Scan all saved sessions for leaked credentials",
-	rotate: "Clear leak warnings: a credential, a key format, a fingerprint, or all",
+	rotated: "Clear leak warnings: a credential, a key format, a fingerprint, or all",
 	scrub: "Rewrite leaked values in saved sessions to [cred-scrubbed:name] markers",
 };
 
@@ -213,7 +213,7 @@ function completions(argumentText: string, catalog: Catalog): { value: string; l
 	if (parts.length === 0) {
 		for (const [label, description] of Object.entries(subcommands)) options.push({ label, description });
 	} else if (parts.length === 1 && !["list", "env", "scan", "scrub"].includes(subcommand)) {
-		if (subcommand === "rotate") {
+		if (subcommand === "rotated") {
 			options.push({ label: "all", description: "clear every leak warning" });
 			for (const leak of leakReport.leaks) options.push({ label: leak.name, description: `${leak.sessions} sessions, last ${leak.last}` });
 			for (const prefix of new Set(leakReport.unknown.map((leak) => leak.prefix))) options.push({ label: prefix, description: `all unregistered ${prefix}… keys` });
@@ -306,7 +306,9 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 		case "edit": {
 			const listing = catalog.credentials.find((item) => item.name === requireName());
 			if (!listing) throw new HelperError("unknown-credential", `No credential is named ${name}.`);
-			const field = await ctx.ui.select(`Edit ${name}`, ["value", "description", "kind", "hosts", "apps", "rotation link", "environment variable"]);
+			const fields = ["value", "description", "kind", "hosts", "apps", "rotation link", "environment variable"];
+			const requested = rest.join(" ");
+			const field = fields.includes(requested) ? requested : await ctx.ui.select(`Edit ${name}`, fields);
 			if (!field) return undefined;
 			const change: Record<string, unknown> = {};
 			if (field === "value") {
@@ -328,7 +330,8 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 				else if (field === "environment variable") change.env = text.trim();
 				else change.rotation = text.trim();
 			}
-			await callHelper("edit", { name, ...change });
+			const result = await callHelper<{ report: LeakReport }>("edit", { name, ...change });
+			showLeaks(ctx, result.report);
 			return `Edited ${name}.`;
 		}
 		case "grant":
@@ -356,9 +359,12 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			showLeaks(ctx, report);
 			return `Scanned ${report.scanned} files. ${report.leaks.length + report.unknown.length ? "See the warning above the editor." : "No leaked credentials found."}`;
 		}
-		case "rotate": {
-			showLeaks(ctx, await callHelper<LeakReport>("rotate", { name: requireName() }));
-			return name === "all" ? "Cleared every leak warning." : `Cleared the leak warnings of ${name}.`;
+		case "rotated": {
+			const choices = ["all", ...leakReport.leaks.map((leak) => leak.name), ...new Set(leakReport.unknown.map((leak) => leak.prefix))];
+			const target = name ?? await ctx.ui.select("Clear leak warnings for", choices);
+			if (!target) return undefined;
+			showLeaks(ctx, await callHelper<LeakReport>("rotated", { name: target }));
+			return target === "all" ? "Cleared every leak warning." : `Cleared the leak warnings of ${target}.`;
 		}
 		case "scrub": {
 			if (!(await ctx.ui.confirm("Rewrite leaked values in saved sessions?", "Matches become [cred-scrubbed:name] or [cred:unknown-…] markers. Sessions changed in the last 10 minutes are skipped."))) return undefined;

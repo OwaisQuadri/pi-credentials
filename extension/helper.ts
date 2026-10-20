@@ -31,11 +31,11 @@ export function describeLeaks(report: LeakReport): string[] | undefined {
 	if (!known && !unknown) return undefined;
 	return [
 		`⚠ ${known} Known and ${unknown} Unknown credential${known + unknown === 1 ? "" : "s"} leaked in chat history.`,
-		...(known ? ["  Known:", ...report.leaks.map((leak) => `  - ${leak.name}${leak.rotation ? ` → ${leak.rotation}` : ""}`)] : []),
+		...(known ? ["  Known:", ...report.leaks.map((leak) => `  - ${leak.name}`)] : []),
 		"",
 		"  register credentials with `/cred register` or `/cred add`",
 		"  use `/cred scrub` to clean the chat history of credentials",
-		"  use `/cred edit <name> value`, `/cred rotate`, or `/cred rotate all` to start with a clean record.",
+		"  use `/cred edit <name> value`, `/cred rotated`, or `/cred rotated all` to start with a clean record.",
 	];
 }
 
