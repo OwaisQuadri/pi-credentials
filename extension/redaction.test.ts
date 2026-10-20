@@ -10,6 +10,9 @@ const fake = join(directory, "helper");
 writeFileSync(fake, `#!/bin/sh
 input=$(cat)
 case "$1" in
+  add)
+    printf '%s' "$input" > "${directory}/add.json"
+    echo '{"added":true}' ;;
   request)
     printf '%s' "$input" > "${directory}/request.json"
     printf '%s' "$input" | /usr/bin/python3 -c 'import json,sys; r=json.load(sys.stdin)["request"]; p=r.get("outputFile"); print(json.dumps({"error":{"code":"output-file-refused","message":"Existing paths are refused."}} if p=="existing" else {"status":200,"body":"NEVER_RETURN","isTruncated":False,"redacted":[],"unavailable":[]} if p=="legacy" else {"status":200,"contentType":"application/octet-stream","outputFile":p,"byteCount":1000001,"body":"NEVER_RETURN","isTruncated":False,"redacted":[],"unavailable":[]} if p else {"status":200,"body":"text response","isTruncated":False,"redacted":[],"unavailable":[]}))' ;;
@@ -24,12 +27,13 @@ process.env.PI_CREDENTIALS_HELPER = fake;
 
 type Handler = (event: unknown, ctx: unknown) => Promise<any>;
 const handlers: Record<string, Handler> = {};
+const events: Record<string, (payload: unknown) => void> = {};
 const tools: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
 const { default: extension } = await import("./index.ts");
 extension({
 	on: (name: string, handler: Handler) => { handlers[name] = handler; },
 	registerCommand: () => undefined,
-	events: { on: () => undefined, emit: () => undefined },
+	events: { on: (channel: string, handler: (payload: unknown) => void) => { events[channel] = handler; }, emit: () => undefined },
 	registerEntryRenderer: () => undefined,
 	appendEntry: () => undefined,
 	registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { tools[tool.name] = tool; },
@@ -123,4 +127,14 @@ test("tool output never reaches the model with a registered key in it", async ()
 	assert.deepEqual(withheld.details, {});
 
 	assert.doesNotMatch(JSON.stringify(withheld), /SECRET/);
+});
+
+test("cred_ask saves a secret handle once and refuses unknown handles", async () => {
+	const ctx = { cwd: directory, hasUI: true, ui: { input: async () => { throw new Error("must not prompt"); } } };
+	events["ask-user-question:secret"]({ handle: "{{secret:0011aabb}}", value: "handle-value-123" });
+	const input = { name: "saved", reason: "test", kind: "api-key", description: "fixture", secret: "{{secret:0011aabb}}" };
+	const result = await tools.cred_ask.execute("fixture", input, undefined, undefined, ctx);
+	assert.equal(JSON.parse(readFileSync(join(directory, "add.json"), "utf8")).value, "handle-value-123");
+	assert.doesNotMatch(JSON.stringify(result), /handle-value-123/);
+	await assert.rejects(tools.cred_ask.execute("fixture", input, undefined, undefined, ctx), /Unknown secret handle/);
 });

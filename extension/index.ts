@@ -50,7 +50,7 @@ function sessionFile(ctx: ExtensionContext): string | undefined {
 }
 
 let currentRun = "";
-const secretHandles = new Map<string, string>();
+const secretHandles: Map<string, string> = (globalThis as any).__piCredentialsSecretHandles ??= new Map<string, string>();
 
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };
 
@@ -587,7 +587,6 @@ export default function piCredentials(pi: ExtensionAPI) {
 		const { handle, value } = (payload ?? {}) as { handle?: unknown; value?: unknown };
 		if (typeof handle === "string" && typeof value === "string") secretHandles.set(handle, value);
 	});
-	pi.on("session_shutdown", () => secretHandles.clear());
 
 	pi.registerTool({
 		name: "cred_ask",
@@ -610,6 +609,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 				: await ctx.ui.input(`${input.reason} · value for ${input.name} (${input.kind})`, "Paste the secret, or press Escape to decline", { signal });
 			if (!value) throw new Error("The user declined to enter the credential.");
 			await callHelper("add", { name: input.name, value, kind: input.kind, description: input.description.trim(), hosts: input.hosts ?? [] });
+			if (input.secret !== undefined) secretHandles.delete(input.secret);
 			await refresh(ctx.cwd);
 			return { content: [{ type: "text", text: `Stored as ${input.name}. It is not granted yet; ask the user to run /cred grant ${input.name} <scope>, or call cred_request and accept the grant prompt.` }], details: { name: input.name } };
 		},
