@@ -32,7 +32,7 @@ public struct LeakScanner: Sendable {
 
   let redactor: Redactor
   let needles: [(bytes: [UInt8], name: String)]
-  let valueFingerprints: [String: String]
+  public let valueFingerprints: [String: String]
   public let signature: String
 
   public init(redactor: Redactor) {

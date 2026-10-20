@@ -190,7 +190,7 @@ func summary(_ credential: Credential) -> String {
 }
 
 func run(_ command: String, _ input: Input) async throws {
-  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete", "rotated", "scrub"]
+  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete", "rotate", "scrub"]
     .contains(command)
   if isMutating { try lockCatalog() }
   var catalog = try Keychain.loadCatalog()
@@ -295,8 +295,23 @@ func run(_ command: String, _ input: Input) async throws {
     if before.rotation != credential.rotation {
       changes.append("rotation link → \(credential.rotation ?? "none")")
     }
+    if let value = input.value {
+      guard !value.isEmpty else { throw CredentialError("missing-field", "Provide a value.") }
+      changes.append("new value, which counts as a rotation and clears its old leak warnings")
+    }
     try Keychain.authenticateOwner(
       reason: "edit '\(name)': \(changes.isEmpty ? "no changes" : changes.joined(separator: "; "))")
+    if let value = input.value {
+      let account = try credential.account ?? Keychain.resolveAccount(service: credential.service, account: nil)
+      try Keychain.replaceValue(service: credential.service, account: account, data: Data(value.utf8))
+      let now = Date().timeIntervalSince1970
+      credential.rotatedAt = now
+      var dismissed = catalog.dismissed ?? [:]
+      for entry in loadScanState().files.values {
+        for (fingerprint, owner) in entry.findings.registered ?? [:] where owner == name { dismissed[fingerprint] = now }
+      }
+      catalog.dismissed = dismissed
+    }
     catalog.credentials[name] = credential
     try Keychain.saveCatalog(catalog)
     emit(["edited": name])
@@ -531,12 +546,24 @@ func run(_ command: String, _ input: Input) async throws {
     let result = try scanSessions(catalog, isFull: input.isFull ?? false, extraRoot: input.sessionDir)
     emit(report(result.state, catalog: catalog, scanned: result.scanned))
 
-  case "rotated":
+  case "rotate":
     let name = try required(input.name, "name")
     let now = Date().timeIntervalSince1970
-    if var credential = catalog.credentials[name] {
+    if name == "all" {
+      let current = report(loadScanState(), catalog: catalog, scanned: 0)
       try Keychain.authenticateOwner(
-        reason: "mark '\(name)' as rotated, which hides its leak warnings for sessions saved before now")
+        reason:
+          "clear all \(current.leaks.count) known and \(current.unknown.count) unknown leak warnings for sessions saved before now")
+      for leak in current.leaks { catalog.credentials[leak.name]?.rotatedAt = now }
+      var dismissed = catalog.dismissed ?? [:]
+      for leak in current.unknown { dismissed[leak.fingerprint] = now }
+      for entry in loadScanState().files.values {
+        for fingerprint in (entry.findings.registered ?? [:]).keys { dismissed[fingerprint] = now }
+      }
+      catalog.dismissed = dismissed
+    } else if var credential = catalog.credentials[name] {
+      try Keychain.authenticateOwner(
+        reason: "clear the leak warnings of '\(name)' for sessions saved before now")
       credential.rotatedAt = now
       catalog.credentials[name] = credential
       var dismissed = catalog.dismissed ?? [:]
@@ -551,7 +578,7 @@ func run(_ command: String, _ input: Input) async throws {
         })
       try Keychain.authenticateOwner(
         reason:
-          "mark all \(fingerprints.count) unregistered \(name) keys as rotated, which hides their leak warnings for sessions saved before now"
+          "clear the leak warnings of all \(fingerprints.count) unregistered \(name) keys for sessions saved before now"
       )
       var dismissed = catalog.dismissed ?? [:]
       for fingerprint in fingerprints { dismissed[fingerprint] = now }
@@ -559,10 +586,10 @@ func run(_ command: String, _ input: Input) async throws {
     } else {
       guard name.count == 12, name.allSatisfy(\.isHexDigit) else {
         throw CredentialError(
-          "unknown-credential", "Use a credential name, a key format such as sk-ant-, or an unknown key's fingerprint.")
+          "unknown-credential", "Use all, a credential name, a key format such as sk-ant-, or an unknown key's fingerprint.")
       }
       try Keychain.authenticateOwner(
-        reason: "mark unknown key \(name) as rotated, which hides its leak warnings for sessions saved before now")
+        reason: "clear the leak warnings of unknown key \(name) for sessions saved before now")
       catalog.dismissed = (catalog.dismissed ?? [:]).merging([name: now]) { _, new in new }
     }
     try Keychain.saveCatalog(catalog)

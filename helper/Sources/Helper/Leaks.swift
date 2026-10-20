@@ -121,8 +121,10 @@ func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
   formatter.timeZone = .current
   var known: [String: (count: Int, last: Double)] = [:]
   var unknown: [String: (prefix: String, count: Int, last: Double)] = [:]
+  let current = scannerFor(catalog).scanner.valueFingerprints
   for entry in state.files.values {
     for name in entry.findings.names where catalog.credentials[name] != nil {
+      if let found = entry.findings.values?[name], let value = current[name], found != value { continue }
       if let rotated = catalog.credentials[name]?.rotatedAt, entry.seen(ScanEntry.nameKey(name, entry.findings)) < rotated { continue }
       let current = known[name] ?? (0, 0)
       known[name] = (current.count + 1, max(current.last, entry.mtime))

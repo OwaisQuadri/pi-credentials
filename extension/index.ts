@@ -19,7 +19,7 @@ const subcommands: Record<string, string> = {
 	delete: "Unregister a credential, optionally deleting its Keychain item",
 	env: "Write a .env file with the credentials granted to this project",
 	scan: "Scan all saved sessions for leaked credentials",
-	rotated: "Mark a leaked credential as replaced",
+	rotate: "Clear leak warnings: a credential, a key format, a fingerprint, or all",
 	scrub: "Rewrite leaked values in saved sessions to [cred-scrubbed:name] markers",
 };
 
@@ -213,7 +213,8 @@ function completions(argumentText: string, catalog: Catalog): { value: string; l
 	if (parts.length === 0) {
 		for (const [label, description] of Object.entries(subcommands)) options.push({ label, description });
 	} else if (parts.length === 1 && !["list", "env", "scan", "scrub"].includes(subcommand)) {
-		if (subcommand === "rotated") {
+		if (subcommand === "rotate") {
+			options.push({ label: "all", description: "clear every leak warning" });
 			for (const leak of leakReport.leaks) options.push({ label: leak.name, description: `${leak.sessions} sessions, last ${leak.last}` });
 			for (const prefix of new Set(leakReport.unknown.map((leak) => leak.prefix))) options.push({ label: prefix, description: `all unregistered ${prefix}… keys` });
 			for (const leak of leakReport.unknown) options.push({ label: leak.fingerprint, description: `unregistered ${leak.prefix}…, ${leak.sessions} sessions` });
@@ -305,10 +306,14 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 		case "edit": {
 			const listing = catalog.credentials.find((item) => item.name === requireName());
 			if (!listing) throw new HelperError("unknown-credential", `No credential is named ${name}.`);
-			const field = await ctx.ui.select(`Edit ${name}`, ["description", "kind", "hosts", "apps", "rotation link", "environment variable"]);
+			const field = await ctx.ui.select(`Edit ${name}`, ["value", "description", "kind", "hosts", "apps", "rotation link", "environment variable"]);
 			if (!field) return undefined;
 			const change: Record<string, unknown> = {};
-			if (field === "kind") {
+			if (field === "value") {
+				const value = await ctx.ui.input(`New value for ${name}`, "Paste the new secret. This counts as a rotation.");
+				if (!value) return undefined;
+				change.value = value;
+			} else if (field === "kind") {
 				const kind = await ctx.ui.select("Kind", kinds);
 				if (!kind) return undefined;
 				change.kind = kind;
@@ -351,9 +356,9 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			showLeaks(ctx, report);
 			return `Scanned ${report.scanned} files. ${report.leaks.length + report.unknown.length ? "See the warning above the editor." : "No leaked credentials found."}`;
 		}
-		case "rotated": {
-			showLeaks(ctx, await callHelper<LeakReport>("rotated", { name: requireName() }));
-			return `Marked ${name} as rotated.`;
+		case "rotate": {
+			showLeaks(ctx, await callHelper<LeakReport>("rotate", { name: requireName() }));
+			return name === "all" ? "Cleared every leak warning." : `Cleared the leak warnings of ${name}.`;
 		}
 		case "scrub": {
 			if (!(await ctx.ui.confirm("Rewrite leaked values in saved sessions?", "Matches become [cred-scrubbed:name] or [cred:unknown-…] markers. Sessions changed in the last 10 minutes are skipped."))) return undefined;
