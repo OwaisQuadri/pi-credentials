@@ -6,7 +6,7 @@ Status: the helper, `/cred list | add | register | edit | grant | revoke | group
 
 ## Install
 
-Requires macOS, Swift 6.4 or newer, and Pi. Pi does not run build steps when it installs or updates a package. When the helper is missing, the extension runs `scripts/build.zsh` at startup, which builds and signs it. Tool output is withheld until the build finishes.
+Requires macOS, Swift 6.4 or newer, and Pi. Pi does not run build steps when it installs or updates a package. When the helper is missing at startup, the extension asks you, then runs `scripts/build.zsh`, which builds and signs it. Pi finishes starting when the build is done. It refuses to build when the package has uncommitted changes or Pi has no interface, and then tells you to run the script yourself.
 
 ```zsh
 pi install git:https://github.com/OwaisQuadri/pi-credentials
@@ -187,7 +187,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 - A program that reads a `.env` file, or receives a variable, can print the value in a transformed form, such as reversed or split, that redaction misses.
 - A server that receives a key can log it.
 - `cred_sudo` gives root to each approved command. Root can bypass every layer above.
-- **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
+- **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. The startup build refuses uncommitted changes, but an agent that can commit to the installed clone can still get its code built and signed when you approve the build. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
 - **Project scope is advisory against an agent that can run the helper.** The helper reads Git remotes from the directory it is given, and an agent can give it any directory. The command guard should block direct helper calls from the shell.
 - Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes. Other encoders, partial values, and transformed values get through.
 - Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values and never writes them to `.env` files. They can still reach output through the app that `cred_type` types into, or a command that `cred_sudo` runs.

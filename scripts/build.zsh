@@ -14,5 +14,5 @@ else
   codesign -f -s - -i dev.pi-credentials.helper "$binary"
 fi
 mkdir -p bin
-install -m 755 "$binary" bin/pi-credentials-helper
+install -S -m 755 "$binary" bin/pi-credentials-helper
 print "Built bin/pi-credentials-helper"

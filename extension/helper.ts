@@ -2,24 +2,43 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export const helperPath = process.env.PI_CREDENTIALS_HELPER ?? fileURLToPath(new URL("../bin/pi-credentials-helper", import.meta.url));
-const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-let build: Promise<void> | undefined;
+export const helperPath = process.env.PI_CREDENTIALS_HELPER || fileURLToPath(new URL("../bin/pi-credentials-helper", import.meta.url));
+export const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+const buildVariables = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "DEVELOPER_DIR", "PI_CREDENTIALS_SIGNING_IDENTITY"];
 
 export function isHelperMissing(): boolean {
 	return !process.env.PI_CREDENTIALS_HELPER && !existsSync(helperPath);
 }
 
-export function ensureHelper(): Promise<void> {
-	if (!isHelperMissing()) return Promise.resolve();
-	build ??= new Promise<void>((resolve, reject) => {
-		execFile("/bin/zsh", ["scripts/build.zsh"], { cwd: packageRoot, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 }, (error, _stdout, stderr) => {
-			build = undefined;
-			if (error || isHelperMissing()) return reject(new HelperError("helper-build-failed", `Could not build the pi-credentials helper: ${(stderr || error?.message || "no binary").trim().split("\n").slice(-3).join(" ")}`));
+export async function uncommittedChanges(): Promise<string> {
+	return new Promise((resolve, reject) => {
+		execFile("git", ["-C", packageRoot, "status", "--porcelain", "--untracked-files=all"], (error, stdout) => {
+			if (error) return reject(new HelperError("helper-build-refused", `Could not check the package with Git: ${error.message}`));
+			resolve(stdout.trim());
+		});
+	});
+}
+
+export function buildHelper(): Promise<void> {
+	const env = Object.fromEntries(buildVariables.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
+	return new Promise((resolve, reject) => {
+		const child = spawn("/bin/zsh", ["scripts/build.zsh"], { cwd: packageRoot, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
+		let stderr = "";
+		let isTimedOut = false;
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
+		const timer = setTimeout(() => {
+			isTimedOut = true;
+			if (child.pid) process.kill(-child.pid, "SIGKILL");
+		}, 600_000);
+		child.on("error", (error) => { clearTimeout(timer); reject(new HelperError("helper-build-failed", `Could not start the helper build: ${error.message}`)); });
+		child.on("close", (status) => {
+			clearTimeout(timer);
+			if (isTimedOut) return reject(new HelperError("helper-build-failed", "The helper build timed out after 10 minutes."));
+			if (status !== 0 || isHelperMissing()) return reject(new HelperError("helper-build-failed", `The helper build failed: ${stderr.trim().split("\n").slice(-3).join(" ")}`));
 			resolve();
 		});
 	});
-	return build;
 }
 
 export type Kind = "api-key" | "password" | "app-password" | "passcode";
@@ -73,9 +92,7 @@ export class HelperError extends Error {
 	}
 }
 
-export async function callHelper<T>(command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-	await ensureHelper();
-	signal?.throwIfAborted();
+export function callHelper<T>(command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(helperPath, [command], { stdio: ["pipe", "pipe", "ignore"], signal });
 		let output = "";
