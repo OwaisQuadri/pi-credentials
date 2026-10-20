@@ -151,7 +151,9 @@ export function grepRefusal(path: string | undefined, glob: string | undefined, 
 interface HTTPResponse {
 	status: number;
 	contentType?: string;
-	body: string;
+	body?: string;
+	outputFile?: string;
+	byteCount?: number;
 	isTruncated: boolean;
 	redacted: string[];
 	unavailable: string[];
@@ -561,10 +563,17 @@ export default function piCredentials(pi: ExtensionAPI) {
 			body: Type.Optional(Type.String()),
 			authHeader: Type.Optional(Type.String({ description: "Header for the key. Default Authorization." })),
 			authPrefix: Type.Optional(Type.String({ description: "Text before the key. Default 'Bearer '. Use '' for raw keys." })),
+			outputFile: Type.Optional(Type.String({ description: "Save response bytes to a new file, relative to the project or absolute. At most 100 MiB; existing paths and symlinks are refused. Only metadata returns." })),
 		}, { additionalProperties: false }),
 		async execute(_id, input, signal, _update, ctx) {
 			const { name, ...request } = input;
 			const response = await useCredential(name, ctx, ["api-key"], signal, () => callHelper<HTTPResponse>("request", { ...base(ctx), name, request }, signal));
+			if (request.outputFile !== undefined) {
+				if (response.outputFile === undefined || response.byteCount === undefined) throw new Error("The helper did not confirm a saved file. Rebuild the helper before using outputFile.");
+				const { status, contentType, outputFile, byteCount, redacted } = response;
+				const text = [`HTTP ${status}${contentType ? ` · ${contentType}` : ""}`, `Saved ${byteCount} bytes to ${outputFile}.`].join("\n");
+				return { content: [{ type: "text", text }], details: { status, contentType, outputFile, byteCount, redacted } };
+			}
 			{
 				const notes = [response.isTruncated ? "Body truncated at 1 MB." : "", response.unavailable.length ? `Could not check output for: ${response.unavailable.join(", ")}.` : ""].filter(Boolean);
 				const text = [`HTTP ${response.status}${response.contentType ? ` · ${response.contentType}` : ""}`, ...notes, "", response.body].join("\n");

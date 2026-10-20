@@ -250,7 +250,9 @@ Each command reads one JSON object from standard input and writes one JSON objec
 
 `notarize` and `sudo` return the exit status, standard output, and standard error, redacted and truncated to 1 MB each. Every action checks the grant for the project in `cwd` and logs the use or the refusal.
 
-`request` accepts `method`, `url`, `headers`, `body`, `authHeader` (default `Authorization`), and `authPrefix` (default `Bearer `). It requires https, refuses redirects, uses no cache or cookie store, and redacts the response body and content type before it truncates the body to 1 MB.
+`request` accepts `method`, `url`, `headers`, `body`, `authHeader` (default `Authorization`), `authPrefix` (default `Bearer `), and optional `outputFile`. It requires https, refuses redirects, and uses no cache or cookie store. Without `outputFile`, it redacts the response body and content type before truncating the body to 1 MB.
+
+With `outputFile`, the helper streams the original response bytes to a new file, up to 100 MiB. Relative paths use the project directory; absolute paths are accepted. Parent directories must exist. Existing destinations, symlinks in any path component, and parent traversal (`..`) are refused. On macOS, use `/private/tmp` rather than its `/tmp` symlink. The file has mode `0600` and appears only after a complete successful HTTP response. HTTP errors, interrupted or oversized responses, unavailable credential checks, and responses containing registered credential forms or the active key are refused without publishing a file. The result contains only `status`, redacted `contentType`, `outputFile`, `byteCount`, and redaction metadata, never response bytes. No filename is inferred from server headers.
 
 `cwd` is the project directory. The helper reads its Git remotes to find the project groups.
 

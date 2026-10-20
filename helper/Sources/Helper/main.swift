@@ -399,9 +399,19 @@ func run(_ command: String, _ input: Input) async throws {
     do {
       let value = try Keychain.value(of: credential)
       let redaction = redactionValues(catalog)
-      let response = try await Requester.send(
-        request, credential: credential, value: value,
-        redactor: Redactor(values: redaction.values + [(name, value)]), unavailable: redaction.unavailable)
+      let redactor = Redactor(values: redaction.values + [(name, value)])
+      let response: HTTPResponse
+      if request.outputFile != nil {
+        response = try await Cancellation.shared.guardedRequest {
+          try await Requester.send(
+            request, credential: credential, value: value, redactor: redactor,
+            unavailable: redaction.unavailable, cwd: input.cwd)
+        }
+      } else {
+        response = try await Requester.send(
+          request, credential: credential, value: value, redactor: redactor,
+          unavailable: redaction.unavailable)
+      }
       logUse(input, groups: projectGroups, action: "request", target: host, result: String(response.status))
       emit(response)
     } catch let error as CredentialError {
