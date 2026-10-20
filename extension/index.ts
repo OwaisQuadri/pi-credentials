@@ -612,7 +612,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 			try {
 				await callHelper("add", { name: input.name, value, kind: input.kind, description: input.description.trim(), hosts: input.hosts ?? [] });
 			} catch (error) {
-				if (input.secret !== undefined && value) secretHandles.set(input.secret, value);
+				if (input.secret !== undefined) secretHandles.set(input.secret, value);
 				throw error;
 			}
 			await refresh(ctx.cwd);
