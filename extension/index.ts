@@ -1,4 +1,4 @@
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { callHelper, describeLeaks, describeListing, HelperError, kinds, type Catalog, type Kind, type LeakReport } from "./helper.ts";
 
 const subcommands: Record<string, string> = {
@@ -50,9 +51,8 @@ function sessionFile(ctx: ExtensionContext): string | undefined {
 
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };
 
-function showLeaks(ctx: ExtensionContext, report: LeakReport) {
+function showLeaks(_ctx: ExtensionContext, report: LeakReport) {
 	leakReport = report;
-	ctx.ui.setWidget("pi-credentials-leaks", describeLeaks(report));
 }
 
 interface ProcessResult {
@@ -264,7 +264,7 @@ async function askMetadata(ctx: ExtensionContext, kind?: Kind) {
 	return { kind: selectedKind, description: description.trim(), hosts, apps };
 }
 
-async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<string | undefined> {
+async function runCommand(argumentText: string, ctx: ExtensionContext, pi: ExtensionAPI): Promise<string | undefined> {
 	const [subcommand = "list", name, ...rest] = argumentText.trim().split(/\s+/).filter(Boolean);
 	const cwd = ctx.cwd;
 	const catalog = await refresh(cwd);
@@ -357,6 +357,8 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 			ctx.ui.notify("Scanning saved sessions. This can take a few minutes.", "info");
 			const report = await callHelper<LeakReport>("scan", { isFull: true, ...sessionDirectory(ctx) });
 			showLeaks(ctx, report);
+			const lines = describeLeaks(report);
+			if (lines) pi.appendEntry("pi-credentials-leaks", { lines });
 			return `Scanned ${report.scanned} files. ${report.leaks.length + report.unknown.length ? "See the warning above the editor." : "No leaked credentials found."}`;
 		}
 		case "rotated": {
@@ -395,12 +397,26 @@ async function offerGrant(name: string, ctx: ExtensionContext, usableKinds: Kind
 }
 
 export default function piCredentials(pi: ExtensionAPI) {
+	pi.registerEntryRenderer<{ lines: string[] }>("pi-credentials-leaks", (entry, _options, theme) => {
+		const [header, ...rest] = entry.data?.lines ?? [];
+		if (!header) return undefined;
+		const box = new Container();
+		box.addChild(new Spacer(1));
+		box.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		box.addChild(new Text(`${theme.bold(theme.fg("warning", header))}\n${rest.join("\n")}`, 1, 0));
+		box.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		return box;
+	});
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
 			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
-			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => showLeaks(ctx, report)).catch(() => undefined);
+			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => {
+				showLeaks(ctx, report);
+				const lines = describeLeaks(report);
+				if (lines) pi.appendEntry("pi-credentials-leaks", { lines });
+			}).catch(() => undefined);
 		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
 	});
 
@@ -495,7 +511,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 		getArgumentCompletions: (argumentText) => completions(argumentText, cache),
 		handler: async (argumentText, ctx) => {
 			try {
-				const message = await runCommand(argumentText, ctx);
+				const message = await runCommand(argumentText, ctx, pi);
 				if (message) ctx.ui.notify(message, "info");
 			} catch (error) {
 				ctx.ui.notify((error as Error).message, "error");

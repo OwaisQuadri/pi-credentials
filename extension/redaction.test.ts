@@ -25,6 +25,8 @@ const { default: extension } = await import("./index.ts");
 extension({
 	on: (name: string, handler: Handler) => { handlers[name] = handler; },
 	registerCommand: () => undefined,
+	registerEntryRenderer: () => undefined,
+	appendEntry: () => undefined,
 	registerTool: () => undefined,
 } as never);
 

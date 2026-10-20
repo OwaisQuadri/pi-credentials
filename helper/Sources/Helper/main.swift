@@ -592,7 +592,7 @@ func run(_ command: String, _ input: Input) async throws {
       for fingerprint in fingerprints { dismissed[fingerprint] = now }
       catalog.dismissed = dismissed
     } else {
-      guard name.count == 12, name.allSatisfy({ $0.isASCII && $0.isHexDigit && !$0.isUppercase }) else {
+      guard LeakScanner.isFingerprint(name) else {
         throw CredentialError(
           "unknown-credential", "Use all, a credential name, a key format such as sk-ant-, or an unknown key's fingerprint.")
       }

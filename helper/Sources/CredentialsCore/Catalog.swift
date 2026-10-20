@@ -66,7 +66,7 @@ public struct Catalog: Codable, Equatable, Sendable {
     let isValid =
       !name.isEmpty && name.count <= 64 && name != "all"
       && !LeakScanner.keyFormats.contains(where: { $0.prefix == name })
-      && !(name.count == 12 && name.allSatisfy(\.isHexDigit))
+      && !LeakScanner.isFingerprint(name.lowercased())
       && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) }
     guard isValid else {
       throw CredentialError("invalid-name", "Use 1 to 64 letters, digits, '-', '_', or '.', other than 'all', a key format, or a 12-character fingerprint.")
