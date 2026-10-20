@@ -26,7 +26,6 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "postinstall": "zsh scripts/build.zsh",
     "test": "node --test extension/*.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },

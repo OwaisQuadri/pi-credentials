@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export const helperPath = process.env.PI_CREDENTIALS_HELPER || fileURLToPath(new URL("../bin/pi-credentials-helper", import.meta.url));
@@ -10,13 +10,19 @@ export function isHelperMissing(): boolean {
 	return !process.env.PI_CREDENTIALS_HELPER && !existsSync(helperPath);
 }
 
-export async function uncommittedChanges(): Promise<string> {
+function git(args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
-		execFile("git", ["-C", packageRoot, "status", "--porcelain", "--untracked-files=all"], (error, stdout) => {
+		execFile("git", ["-C", packageRoot, ...args], (error, stdout) => {
 			if (error) return reject(new HelperError("helper-build-refused", `Could not check the package with Git: ${error.message}`));
 			resolve(stdout.trim());
 		});
 	});
+}
+
+export async function uncommittedChanges(): Promise<string> {
+	const top = await git(["rev-parse", "--show-toplevel"]);
+	if (realpathSync(top) !== realpathSync(packageRoot)) return `The package is not its own Git checkout (${top}).`;
+	return git(["status", "--porcelain", "--untracked-files=all"]);
 }
 
 export function buildHelper(): Promise<void> {
@@ -29,7 +35,7 @@ export function buildHelper(): Promise<void> {
 		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
 		const timer = setTimeout(() => {
 			isTimedOut = true;
-			if (child.pid) process.kill(-child.pid, "SIGKILL");
+			try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch {}
 		}, 600_000);
 		child.on("error", (error) => { clearTimeout(timer); reject(new HelperError("helper-build-failed", `Could not start the helper build: ${error.message}`)); });
 		child.on("close", (status) => {
