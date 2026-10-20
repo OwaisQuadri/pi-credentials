@@ -2,7 +2,7 @@
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
-Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, the read block for `.env` and Pi auth files, leak warnings with `/cred scan | rotated | scrub`, and last use in `/cred list` work. These parts of the design are not built yet: one-time values and `{{secret:…}}` handles, and the input mask toggle.
+Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, the read block for `.env` and Pi auth files, leak warnings with `/cred scan | rotated | scrub`, last use in `/cred list`, and saving a `{{secret:…}}` handle from `pi-ask-user` work. One-time use of a handle without saving it is not built yet.
 
 ## Install
 
@@ -90,7 +90,7 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 | `app-password` | `cred_notarize` | Runs `xcrun notarytool` with the password on standard input. |
 | `passcode` | `cred_type` | Same as above. |
 | `api-key`, `app-password` | `cred_env`, `/cred env`, `cred env create` | Writes a `.env` file with the credentials granted to this project. |
-| — | `cred_ask` | Asks you for a new secret in an input box. See [Input](#input). |
+| — | `cred_ask` | Asks you for a new secret in an input box, or saves a `secret` handle from `ask_user_question`. See [Input](#input). |
 
 `cred_type` takes a running app's bundle identifier or name. Exactly one running app must match, its bundle identifier must be in the credential's allowed apps, and its signature must chain to Apple for that identifier. A credential with no allowed apps is never typed. Allow only apps that do not save or show typed text, such as iPhone Mirroring or a password dialog; a terminal or text editor would let an agent read the value back. The helper sends each key to that app's process. By default it brings the app to the front first and stops if another app takes focus. With `isActivating: false` it types in the background, which works only in apps that accept background input. The helper needs Accessibility permission: System Settings > Privacy & Security > Accessibility.
 
@@ -121,12 +121,11 @@ ln -s <package directory>/scripts/cred.zsh ~/.local/bin/cred
 
 ## Input
 
-Two routes bring a new secret in. Neither shows the value to the model.
+Three routes bring a new secret in. None shows the value to the model.
 
 1. **You start it.** `/cred add <name>` opens an input box.
-2. **The agent starts it.** `cred_ask(name, reason)` opens the same input box mid-task. If `pi-ask-user` is installed, its secure field does the same inside a richer prompt and hands the value to this package through Pi's in-process event bus.
-
-The input shows text by default, with a mask toggle. You can use the value once or save it. A one-time value returns to the model as a session handle, such as `{{secret:3f9a}}`, that only broker actions accept. Saving requires Touch ID.
+2. **The agent starts it.** `cred_ask(name, reason)` opens the same input box mid-task.
+3. **The agent asks with `pi-ask-user`.** `ask_user_question` with `secure: true` shows the value by default, and Ctrl+T masks it. The model gets only a session handle, such as `{{secret:3f9a01bc}}`. `pi-ask-user` hands the value to this package through Pi's in-process event bus. `cred_ask` with `secret: <handle>` then saves it without asking again. Saving requires Touch ID and uses up the handle. Handles last until Pi exits.
 
 ## Missing access
 
@@ -209,7 +208,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 | `cred_sudo` | Runs one command as root with a registered `password`, after Touch ID shows the exact command |
 | `cred_notarize` | Runs `xcrun notarytool` with a registered `app-password` |
 | `cred_env` | Writes a `.env` file with the credentials granted to this project |
-| `cred_ask` | Asks you to enter a new secret, which goes straight to Keychain |
+| `cred_ask` | Asks you to enter a new secret, or saves a `secret` handle from `ask_user_question`; the value goes straight to Keychain |
 
 When a credential is not granted and you are present, `cred_request`, `cred_type`, `cred_sudo`, and `cred_notarize` offer the grant. While one of them runs, the footer shows `🔑 <name>`.
 
