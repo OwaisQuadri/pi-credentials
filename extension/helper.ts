@@ -1,7 +1,52 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-export const helperPath = process.env.PI_CREDENTIALS_HELPER ?? fileURLToPath(new URL("../bin/pi-credentials-helper", import.meta.url));
+export const helperPath = process.env.PI_CREDENTIALS_HELPER || fileURLToPath(new URL("../bin/pi-credentials-helper", import.meta.url));
+export const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+const buildVariables = ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "DEVELOPER_DIR", "PI_CREDENTIALS_SIGNING_IDENTITY"];
+
+export function isHelperMissing(): boolean {
+	return !process.env.PI_CREDENTIALS_HELPER && !existsSync(helperPath);
+}
+
+function git(args: string[]): Promise<string> {
+	return new Promise((resolve, reject) => {
+		execFile("git", ["-C", packageRoot, ...args], (error, stdout, stderr) => {
+			if (error) return reject(new HelperError("helper-build-refused", `could not check the package with Git (${(stderr.trim() || error.message).split("\n")[0]}).`));
+			resolve(stdout.trimEnd());
+		});
+	});
+}
+
+export async function uncommittedChanges(): Promise<string> {
+	const top = await git(["rev-parse", "--show-toplevel"]);
+	if (realpathSync(top) !== realpathSync(packageRoot)) return `the package is not its own Git checkout (${top}).`;
+	const changes = await git(["status", "--porcelain", "--ignored", "--untracked-files=all", "--", "Package*.swift", "Package.resolved", ".swiftpm", "helper", "scripts"]);
+	return changes ? `the helper source has uncommitted changes:\n${changes}\n` : "";
+}
+
+export function buildHelper(): Promise<void> {
+	const env = Object.fromEntries(buildVariables.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
+	return new Promise((resolve, reject) => {
+		const child = spawn("/bin/zsh", ["-f", "scripts/build.zsh"], { cwd: packageRoot, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
+		let stderr = "";
+		let isTimedOut = false;
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
+		const timer = setTimeout(() => {
+			isTimedOut = true;
+			try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch {}
+		}, 600_000);
+		child.on("error", (error) => { clearTimeout(timer); reject(new HelperError("helper-build-failed", `Could not start the helper build: ${error.message}`)); });
+		child.on("close", (status) => {
+			clearTimeout(timer);
+			if (isTimedOut) return reject(new HelperError("helper-build-failed", "The helper build timed out after 10 minutes."));
+			if (status !== 0 || isHelperMissing()) return reject(new HelperError("helper-build-failed", `The helper build failed: ${stderr.trim().split("\n").slice(-3).join(" ")}`));
+			resolve();
+		});
+	});
+}
 
 export type Kind = "api-key" | "password" | "app-password" | "passcode";
 export const kinds: Kind[] = ["api-key", "password", "app-password", "passcode"];
