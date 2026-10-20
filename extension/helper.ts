@@ -30,7 +30,7 @@ export function describeLeaks(report: LeakReport): string[] | undefined {
 	const unknown = report.unknown.length;
 	if (!known && !unknown) return undefined;
 	return [
-		`⚠ ${known} Known and ${unknown} Unknown credential${known + unknown === 1 ? "" : "s"} leaked in chat history.`,
+		`⚠ ${known} Known and ${unknown} Unknown credentials leaked in chat history.`,
 		...(known ? ["  Known:", ...report.leaks.map((leak) => `  - ${leak.name}`)] : []),
 		"",
 		"  register credentials with `/cred register` or `/cred add`",
