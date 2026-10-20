@@ -13,6 +13,6 @@ else
   print -u2 'No Developer ID identity: using ad-hoc signing. Keychain access resets after each rebuild.'
   /usr/bin/codesign -f -s - -i dev.pi-credentials.helper "$binary"
 fi
-mkdir -p bin
+/bin/mkdir -p bin
 /usr/bin/install -S -m 755 "$binary" bin/pi-credentials-helper
 print "Built bin/pi-credentials-helper"
