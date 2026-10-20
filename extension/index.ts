@@ -416,8 +416,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 			if (isHelperMissing()) {
 				const fix = `Run scripts/build.zsh in ${packageRoot}.`;
 				if (!ctx.hasUI) throw new HelperError("helper-unavailable", `The helper is missing. ${fix}`);
-				const changes = await uncommittedChanges();
-				if (changes) throw new HelperError("helper-build-refused", `The helper is missing, and the package has uncommitted changes, so it was not built automatically. Check them, then run scripts/build.zsh in ${packageRoot}.`);
+				const refusal = await uncommittedChanges().catch((error: Error) => error.message);
+				if (refusal) throw new HelperError("helper-build-refused", `The helper is missing and was not built automatically: ${refusal} ${fix}`);
 				const isApproved = await ctx.ui.confirm("Build the pi-credentials helper?", `The helper is missing, usually after pi update. This builds and signs it from ${packageRoot}. Pi finishes starting when the build is done.`);
 				if (!isApproved) throw new HelperError("helper-unavailable", `The helper is missing. ${fix}`);
 				ctx.ui.notify("pi-credentials is building its helper.", "info");

@@ -13,7 +13,7 @@ export function isHelperMissing(): boolean {
 function git(args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
 		execFile("git", ["-C", packageRoot, ...args], (error, stdout) => {
-			if (error) return reject(new HelperError("helper-build-refused", `Could not check the package with Git: ${error.message}`));
+			if (error) return reject(new HelperError("helper-build-refused", `could not check the package with Git (${error.message.trim().split("\n")[0]}).`));
 			resolve(stdout.trim());
 		});
 	});
@@ -21,14 +21,15 @@ function git(args: string[]): Promise<string> {
 
 export async function uncommittedChanges(): Promise<string> {
 	const top = await git(["rev-parse", "--show-toplevel"]);
-	if (realpathSync(top) !== realpathSync(packageRoot)) return `The package is not its own Git checkout (${top}).`;
-	return git(["status", "--porcelain", "--untracked-files=all"]);
+	if (realpathSync(top) !== realpathSync(packageRoot)) return `the package is not its own Git checkout (${top}).`;
+	const changes = await git(["status", "--porcelain", "--untracked-files=all", "--", "Package.swift", "Package.resolved", "helper", "scripts"]);
+	return changes ? `the helper source has uncommitted changes:\n${changes}\n` : "";
 }
 
 export function buildHelper(): Promise<void> {
 	const env = Object.fromEntries(buildVariables.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : []));
 	return new Promise((resolve, reject) => {
-		const child = spawn("/bin/zsh", ["scripts/build.zsh"], { cwd: packageRoot, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
+		const child = spawn("/bin/zsh", ["-f", "scripts/build.zsh"], { cwd: packageRoot, env, detached: true, stdio: ["ignore", "ignore", "pipe"] });
 		let stderr = "";
 		let isTimedOut = false;
 		child.stderr.setEncoding("utf8");
