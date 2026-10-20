@@ -1,4 +1,4 @@
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
@@ -6,20 +6,21 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { callHelper, describeLeaks, describeListing, HelperError, kinds, type Catalog, type Kind, type LeakReport } from "./helper.ts";
 
 const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
 	add: "Store a new credential value",
 	register: "Take over an existing Keychain item",
-	edit: "Change a credential's description, kind, hosts, apps, rotation link, or environment variable",
+	edit: "Change a credential's value, description, kind, hosts, apps, rotation link, or environment variable",
 	grant: "Let agents use a credential globally or in a project group",
 	revoke: "Remove a grant",
 	group: "Set or remove a project group's Git remote patterns",
 	delete: "Unregister a credential, optionally deleting its Keychain item",
 	env: "Write a .env file with the credentials granted to this project",
 	scan: "Scan all saved sessions for leaked credentials",
-	rotated: "Mark a leaked credential as replaced",
+	rotated: "Clear leak warnings: a credential, a key format, a fingerprint, or all",
 	scrub: "Rewrite leaked values in saved sessions to [cred-scrubbed:name] markers",
 };
 
@@ -48,11 +49,12 @@ function sessionFile(ctx: ExtensionContext): string | undefined {
 	return file ? resolve(file) : undefined;
 }
 
+let currentRun = "";
+
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };
 
-function showLeaks(ctx: ExtensionContext, report: LeakReport) {
+function setLeakReport(report: LeakReport) {
 	leakReport = report;
-	ctx.ui.setWidget("pi-credentials-leaks", describeLeaks(report));
 }
 
 interface ProcessResult {
@@ -214,6 +216,7 @@ function completions(argumentText: string, catalog: Catalog): { value: string; l
 		for (const [label, description] of Object.entries(subcommands)) options.push({ label, description });
 	} else if (parts.length === 1 && !["list", "env", "scan", "scrub"].includes(subcommand)) {
 		if (subcommand === "rotated") {
+			options.push({ label: "all", description: "clear every leak warning" });
 			for (const leak of leakReport.leaks) options.push({ label: leak.name, description: `${leak.sessions} sessions, last ${leak.last}` });
 			for (const prefix of new Set(leakReport.unknown.map((leak) => leak.prefix))) options.push({ label: prefix, description: `all unregistered ${prefix}… keys` });
 			for (const leak of leakReport.unknown) options.push({ label: leak.fingerprint, description: `unregistered ${leak.prefix}…, ${leak.sessions} sessions` });
@@ -263,7 +266,7 @@ async function askMetadata(ctx: ExtensionContext, kind?: Kind) {
 	return { kind: selectedKind, description: description.trim(), hosts, apps };
 }
 
-async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<string | undefined> {
+async function runCommand(argumentText: string, ctx: ExtensionContext, pi: ExtensionAPI): Promise<string | undefined> {
 	const [subcommand = "list", name, ...rest] = argumentText.trim().split(/\s+/).filter(Boolean);
 	const cwd = ctx.cwd;
 	const catalog = await refresh(cwd);
@@ -305,10 +308,16 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 		case "edit": {
 			const listing = catalog.credentials.find((item) => item.name === requireName());
 			if (!listing) throw new HelperError("unknown-credential", `No credential is named ${name}.`);
-			const field = await ctx.ui.select(`Edit ${name}`, ["description", "kind", "hosts", "apps", "rotation link", "environment variable"]);
+			const fields = ["value", "description", "kind", "hosts", "apps", "rotation link", "environment variable"];
+			const requested = rest.join(" ");
+			const field = fields.includes(requested) ? requested : await ctx.ui.select(`Edit ${name}`, fields);
 			if (!field) return undefined;
 			const change: Record<string, unknown> = {};
-			if (field === "kind") {
+			if (field === "value") {
+				const value = await ctx.ui.input(`New value for ${name}`, "Paste the new secret. This counts as a rotation.");
+				if (!value) return undefined;
+				change.value = value;
+			} else if (field === "kind") {
 				const kind = await ctx.ui.select("Kind", kinds);
 				if (!kind) return undefined;
 				change.kind = kind;
@@ -323,7 +332,10 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 				else if (field === "environment variable") change.env = text.trim();
 				else change.rotation = text.trim();
 			}
-			await callHelper("edit", { name, ...change });
+			const isLeakedBefore = leakReport.leaks.some((leak) => leak.name === name);
+			const result = await callHelper<{ report: LeakReport }>("edit", { name, ...change });
+			setLeakReport(result.report);
+			if (field === "value" && isLeakedBefore && !result.report.leaks.some((leak) => leak.name === name)) return `Edited ${name}. Its leak warnings are resolved.`;
 			return `Edited ${name}.`;
 		}
 		case "grant":
@@ -348,17 +360,22 @@ async function runCommand(argumentText: string, ctx: ExtensionContext): Promise<
 		case "scan": {
 			ctx.ui.notify("Scanning saved sessions. This can take a few minutes.", "info");
 			const report = await callHelper<LeakReport>("scan", { isFull: true, ...sessionDirectory(ctx) });
-			showLeaks(ctx, report);
-			return `Scanned ${report.scanned} files. ${report.leaks.length + report.unknown.length ? "See the warning above the editor." : "No leaked credentials found."}`;
+			setLeakReport(report);
+			const lines = describeLeaks(report);
+			if (lines && ctx.hasUI) pi.appendEntry("pi-credentials-leaks", { lines, run: currentRun });
+			return `Scanned ${report.scanned} files. ${report.leaks.length + report.unknown.length ? "See the warning above." : "No leaked credentials found."}`;
 		}
 		case "rotated": {
-			showLeaks(ctx, await callHelper<LeakReport>("rotated", { name: requireName() }));
-			return `Marked ${name} as rotated.`;
+			const choices = ["all", ...leakReport.leaks.map((leak) => leak.name), ...new Set(leakReport.unknown.map((leak) => leak.prefix))];
+			const target = name ?? await ctx.ui.select("Clear leak warnings for", choices);
+			if (!target) return undefined;
+			setLeakReport(await callHelper<LeakReport>("rotated", { name: target }));
+			return target === "all" ? "Cleared every leak warning." : `Cleared the leak warnings of ${target}.`;
 		}
 		case "scrub": {
 			if (!(await ctx.ui.confirm("Rewrite leaked values in saved sessions?", "Matches become [cred-scrubbed:name] or [cred:unknown-…] markers. Sessions changed in the last 10 minutes are skipped."))) return undefined;
 			const result = await callHelper<{ rewritten: number; skipped: number; report: LeakReport }>("scrub", { exclude: sessionFile(ctx) });
-			showLeaks(ctx, result.report);
+			setLeakReport(result.report);
 			return `Rewrote ${result.rewritten} files.${result.skipped ? ` Skipped ${result.skipped} recently active files; run /cred scrub again later.` : ""}`;
 		}
 		case "env": {
@@ -384,12 +401,26 @@ async function offerGrant(name: string, ctx: ExtensionContext, usableKinds: Kind
 }
 
 export default function piCredentials(pi: ExtensionAPI) {
+	currentRun = randomUUID();
+	pi.registerEntryRenderer<{ lines: string[]; run: string }>("pi-credentials-leaks", (entry, _options, theme) => {
+		const [header, ...rest] = entry.data?.lines ?? [];
+		if (!header || entry.data?.run !== currentRun) return undefined;
+		const box = new Container();
+		box.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		box.addChild(new Text(`${theme.bold(theme.fg("warning", header))}\n${rest.join("\n")}`, 1, 0));
+		box.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		return box;
+	});
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
 			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
-			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => showLeaks(ctx, report)).catch(() => undefined);
+			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => {
+				setLeakReport(report);
+				const lines = describeLeaks(report);
+				if (lines && ctx.hasUI) pi.appendEntry("pi-credentials-leaks", { lines, run: currentRun });
+			}).catch(() => undefined);
 		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
 	});
 
@@ -484,7 +515,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 		getArgumentCompletions: (argumentText) => completions(argumentText, cache),
 		handler: async (argumentText, ctx) => {
 			try {
-				const message = await runCommand(argumentText, ctx);
+				const message = await runCommand(argumentText, ctx, pi);
 				if (message) ctx.ui.notify(message, "info");
 			} catch (error) {
 				ctx.ui.notify((error as Error).message, "error");

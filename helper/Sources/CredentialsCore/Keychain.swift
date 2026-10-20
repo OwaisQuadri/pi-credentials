@@ -64,6 +64,13 @@ public enum Keychain {
     }
   }
 
+  public static func replaceValue(service: String, account: String, data: Data) throws {
+    let status = SecItemUpdate(
+      baseQuery(service: service, account: account) as CFDictionary,
+      [kSecValueData as String: data] as CFDictionary)
+    guard status == errSecSuccess else { throw failure(status, "Update '\(service)'") }
+  }
+
   static let copiedAttributes = [
     kSecAttrLabel as String, kSecAttrComment as String, kSecAttrDescription as String,
     kSecAttrGeneric as String,

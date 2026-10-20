@@ -26,19 +26,16 @@ export interface LeakReport {
 }
 
 export function describeLeaks(report: LeakReport): string[] | undefined {
-	const count = report.leaks.length + report.unknown.length;
-	if (!count) return undefined;
-	const sessions = (value: number) => `${value} session${value === 1 ? "" : "s"}`;
+	const known = report.leaks.length;
+	const unknown = report.unknown.length;
+	if (!known && !unknown) return undefined;
 	return [
-		`⚠ ${count} credential${count === 1 ? "" : "s"} leaked in chat history. Rotate ${count === 1 ? "it" : "them"}:`,
-		...report.leaks.map((leak) => `  ${leak.name}  ${sessions(leak.sessions)}, last ${leak.last} → ${leak.rotation ?? `/cred edit ${leak.name} to add a rotation link`}`),
-		...[...new Set(report.unknown.map((leak) => leak.prefix))].map((prefix) => {
-			const group = report.unknown.filter((leak) => leak.prefix === prefix);
-			const total = group.reduce((sum, leak) => sum + leak.sessions, 0);
-			const last = group.map((leak) => leak.last).sort().at(-1);
-			return `  ${group.length} unregistered ${prefix}… key${group.length === 1 ? "" : "s"}  ${sessions(total)}, last ${last} → rotate at the provider, then /cred rotated ${prefix}`;
-		}),
-		"  /cred scrub rewrites them in saved sessions.",
+		`⚠ ${known} Known and ${unknown} Unknown credentials leaked in chat history.`,
+		...(known ? ["  Known:", ...report.leaks.map((leak) => `  - ${leak.name}`)] : []),
+		"",
+		"  register credentials with `/cred register` or `/cred add`",
+		"  use `/cred scrub` to clean the chat history of credentials",
+		"  use `/cred edit <name> value`, `/cred rotated`, or `/cred rotated all` to start with a clean record.",
 	];
 }
 

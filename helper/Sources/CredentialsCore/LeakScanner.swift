@@ -32,7 +32,7 @@ public struct LeakScanner: Sendable {
 
   let redactor: Redactor
   let needles: [(bytes: [UInt8], name: String)]
-  let valueFingerprints: [String: String]
+  public let valueFingerprints: [String: String]
   public let signature: String
 
   public init(redactor: Redactor) {
@@ -67,6 +67,10 @@ public struct LeakScanner: Sendable {
     guard start > 0, isTokenByte(buffer[start - 1]) else { return true }
     let isEscape = [UInt8(ascii: "n"), UInt8(ascii: "r"), UInt8(ascii: "t")].contains(buffer[start - 1])
     return isEscape && start > 1 && buffer[start - 2] == UInt8(ascii: "\\")
+  }
+
+  public static func isFingerprint(_ text: String) -> Bool {
+    text.count == 12 && text.allSatisfy { $0.isASCII && $0.isHexDigit && !$0.isUppercase }
   }
 
   public static func fingerprint(_ token: String) -> String {
@@ -126,7 +130,7 @@ public struct LeakScanner: Sendable {
             if !names.contains(body) { names.append(body) }
           } else if let format = Self.keyFormats.first(where: { body.hasPrefix($0.prefix) }) {
             let fingerprint = String(body.dropFirst(format.prefix.count))
-            if fingerprint.count == 12 && fingerprint.allSatisfy(\.isHexDigit) {
+            if Self.isFingerprint(fingerprint) {
               unknown[fingerprint] = format.prefix
             }
           }

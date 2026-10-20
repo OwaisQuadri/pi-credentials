@@ -64,10 +64,12 @@ public struct Catalog: Codable, Equatable, Sendable {
 
   public static func validateName(_ name: String) throws {
     let isValid =
-      !name.isEmpty && name.count <= 64
+      !name.isEmpty && name.count <= 64 && name != "all"
+      && !LeakScanner.keyFormats.contains(where: { $0.prefix == name })
+      && !LeakScanner.isFingerprint(name.lowercased())
       && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) }
     guard isValid else {
-      throw CredentialError("invalid-name", "Use 1 to 64 letters, digits, '-', '_', or '.'.")
+      throw CredentialError("invalid-name", "Use 1 to 64 letters, digits, '-', '_', or '.', other than 'all', a key format, or a 12-character fingerprint.")
     }
   }
 
