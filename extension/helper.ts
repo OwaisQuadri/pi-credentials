@@ -1,7 +1,26 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export const helperPath = process.env.PI_CREDENTIALS_HELPER ?? fileURLToPath(new URL("../bin/pi-credentials-helper", import.meta.url));
+const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+let build: Promise<void> | undefined;
+
+export function isHelperMissing(): boolean {
+	return !process.env.PI_CREDENTIALS_HELPER && !existsSync(helperPath);
+}
+
+export function ensureHelper(): Promise<void> {
+	if (!isHelperMissing()) return Promise.resolve();
+	build ??= new Promise<void>((resolve, reject) => {
+		execFile("/bin/zsh", ["scripts/build.zsh"], { cwd: packageRoot, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 }, (error, _stdout, stderr) => {
+			build = undefined;
+			if (error || isHelperMissing()) return reject(new HelperError("helper-build-failed", `Could not build the pi-credentials helper: ${(stderr || error?.message || "no binary").trim().split("\n").slice(-3).join(" ")}`));
+			resolve();
+		});
+	});
+	return build;
+}
 
 export type Kind = "api-key" | "password" | "app-password" | "passcode";
 export const kinds: Kind[] = ["api-key", "password", "app-password", "passcode"];
@@ -54,7 +73,9 @@ export class HelperError extends Error {
 	}
 }
 
-export function callHelper<T>(command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+export async function callHelper<T>(command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+	await ensureHelper();
+	signal?.throwIfAborted();
 	return new Promise((resolve, reject) => {
 		const child = spawn(helperPath, [command], { stdio: ["pipe", "pipe", "ignore"], signal });
 		let output = "";

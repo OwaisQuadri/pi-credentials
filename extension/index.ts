@@ -7,7 +7,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { callHelper, describeLeaks, describeListing, HelperError, kinds, type Catalog, type Kind, type LeakReport } from "./helper.ts";
+import { callHelper, describeLeaks, describeListing, ensureHelper, HelperError, isHelperMissing, kinds, type Catalog, type Kind, type LeakReport } from "./helper.ts";
 
 const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
@@ -413,6 +413,11 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 	pi.on("session_start", async (_event, ctx) => {
 		try {
+			if (isHelperMissing()) {
+				ctx.ui.notify("pi-credentials is building its helper. Tool output is withheld until the build finishes.", "info");
+				await ensureHelper();
+				ctx.ui.notify("pi-credentials built its helper.", "info");
+			}
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
 			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
