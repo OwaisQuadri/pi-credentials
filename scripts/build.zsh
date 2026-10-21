@@ -1,6 +1,10 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
+if [[ -e .swiftpm ]]; then
+  print -u2 'Remove .swiftpm before building: SwiftPM reads its configuration, which Git does not track.'
+  exit 1
+fi
 swift build -c release -Xswiftc -warnings-as-errors
 binary="$(swift build -c release --show-bin-path)/pi-credentials-helper"
 identity=${PI_CREDENTIALS_SIGNING_IDENTITY:-}

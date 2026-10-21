@@ -6,7 +6,7 @@ Status: the helper, `/cred list | add | register | edit | grant | revoke | group
 
 ## Install
 
-Requires macOS, Swift 6.4 or newer, and Pi. The package has no install script, so installing or updating does not build the helper. When the helper is missing at startup, the extension asks you, then runs `scripts/build.zsh`, which builds and signs it. Pi finishes starting when the build is done. It refuses to build when the helper source has uncommitted changes, the package is not its own Git checkout, or Pi has no interface, and then tells you to run the script yourself.
+Requires macOS, Swift 6.4 or newer, and Pi. The package has no install script. After `pi install` or `pi update`, the helper is missing or out of date when Pi starts. The extension then asks you and runs `scripts/build.zsh` through [pi-compiled](https://github.com/OwaisQuadri/pi-compiled), which builds and signs it. Pi finishes starting when the build is done. It refuses to build when the helper source has uncommitted or ignored changes, when `.swiftpm` exists, when the package is not its own Git checkout, or when Pi has no interface, and then tells you to run the script yourself.
 
 ```zsh
 pi install git:https://github.com/OwaisQuadri/pi-credentials
