@@ -1,8 +1,14 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h:h}"
-swift build -c release -Xswiftc -warnings-as-errors
-binary="$(swift build -c release --show-bin-path)/pi-credentials-helper"
+if [[ -e .swiftpm ]]; then
+  print -u2 'Remove .swiftpm before building: SwiftPM reads its configuration, which Git does not track.'
+  exit 1
+fi
+scratch=.build/helper-release
+/bin/rm -rf "$scratch"
+swift build --scratch-path "$scratch" -c release -Xswiftc -warnings-as-errors
+binary="$(swift build --scratch-path "$scratch" -c release --show-bin-path)/pi-credentials-helper"
 identity=${PI_CREDENTIALS_SIGNING_IDENTITY:-}
 if [[ -z "$identity" ]]; then
   identity=$(/usr/bin/security find-identity -p codesigning -v | /usr/bin/awk '/Developer ID Application/ {print $2; exit}')
