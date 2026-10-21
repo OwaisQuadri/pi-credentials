@@ -630,7 +630,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 					...(isRemote ? { sshTarget: input.sshTarget } : {}),
 				}, signal));
 				if (isRemote) {
-					const remote = describeRemoteProcess(result);
+					const remote = describeRemoteProcess(signal?.aborted ? undefined : result);
 					return { content: [{ type: "text", text: remote.text }], details: { status: remote.status }, isError: remote.isError };
 				}
 				return { content: [{ type: "text", text: describeProcess(result) }], details: { status: result.status }, isError: result.status !== 0 };

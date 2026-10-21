@@ -287,6 +287,13 @@ test("remote interruption and malformed responses never claim stopped or trigger
 	const result = await tools.cred_sudo.execute("fixture", input, aborted.signal, undefined, ctx);
 	assert.equal(result.isError, true);
 	assert.match(result.content[0].text, /Remote completion was not confirmed/);
+	writeFileSync(response, JSON.stringify(valid));
+	const late = new AbortController();
+	const lateCtx = { ...ctx, ui: { setStatus: (_key: string, value: string | undefined) => { if (value === undefined) late.abort(); } } };
+	const lateResult = await tools.cred_sudo.execute("fixture", input, late.signal, undefined, lateCtx);
+	assert.equal(late.signal.aborted, true);
+	assert.equal(lateResult.isError, true);
+	assert.match(lateResult.content[0].text, /Remote completion was not confirmed/);
 	rmSync(response);
 });
 
