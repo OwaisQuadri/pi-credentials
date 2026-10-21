@@ -51,6 +51,17 @@ test("the helper builds after install without asking, shows its progress, and re
 	assert.equal(again.widgets.length, 0);
 });
 
+test("only the fetched upstream commit is built, and a failed build clears its progress bar", async () => {
+	const local = context();
+	await assert.rejects(prepareHelper(local.ctx, { ...checkout(), isUpstreamRequired: true }), (error: Error & { code: string }) => error.code === "helper-build-refused" && /upstream/.test(error.message));
+	assert.equal(local.widgets.length, 0);
+
+	const failing = context();
+	await assert.rejects(prepareHelper(failing.ctx, { ...checkout(), buildCommand: ["/bin/sh", "-c", "echo '[1/2] Compiling helper'; exit 1"] }), { code: "build-failed" });
+	assert.ok(failing.widgets.some((lines) => lines?.[0]?.includes("1/2 Compiling helper")));
+	assert.equal(failing.widgets.at(-1), undefined);
+});
+
 test("a helper override must be an absolute path to an executable, so a relative name is never run", async () => {
 	const build = checkout();
 	process.env.PI_CREDENTIALS_GATE_TEST = "helper";
