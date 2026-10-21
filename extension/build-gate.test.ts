@@ -5,58 +5,57 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { BuildSpec } from "pi-compiled";
-import { prepareHelper } from "./helper.ts";
+import { helperBuild, prepareHelper } from "./helper.ts";
 
 function checkout(): BuildSpec {
 	const root = mkdtempSync(join(tmpdir(), "pi-credentials-gate-"));
 	writeFileSync(join(root, "source.txt"), "v1\n");
 	writeFileSync(join(root, ".gitignore"), "bin/\n.swiftpm/\n");
 	for (const args of [["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]]) execFileSync("git", ["-C", root, ...args]);
-	return { packageRoot: root, binary: "bin/helper", buildCommand: ["/bin/sh", "-c", "mkdir -p bin && touch bin/helper && chmod +x bin/helper"], inputs: ["source.txt"], overrideEnv: "PI_CREDENTIALS_GATE_TEST" };
+	return { packageRoot: root, binary: "bin/helper", buildCommand: ["/bin/sh", "-c", "echo '[1/2] Compiling helper'; mkdir -p bin && touch bin/helper && chmod +x bin/helper; echo '[2/2] Linking helper'"], inputs: ["source.txt"], overrideEnv: "PI_CREDENTIALS_GATE_TEST" };
 }
 
-function context(isApproved: boolean, isInteractive = true) {
+function context(isInteractive = true) {
+	const widgets: (string[] | undefined)[] = [];
 	const asked: string[] = [];
-	return { asked, ctx: { hasUI: isInteractive, ui: { confirm: async (title: string) => { asked.push(title); return isApproved; }, notify: () => undefined } } as never };
+	const ctx = { hasUI: isInteractive, ui: { confirm: async (title: string) => { asked.push(title); return true; }, notify: () => undefined, setWidget: (_key: string, lines: string[] | undefined) => { widgets.push(lines); } } } as never;
+	return { ctx, widgets, asked };
 }
 
-test("the helper is built and signed only after the user approves, and never without a prompt or from unchecked source", async () => {
+test("the helper builds after install without asking, shows its progress, and refuses unchecked source", async () => {
+	assert.equal(helperBuild.isUpstreamRequired, true);
 	let build = checkout();
-	const silent = context(true, false);
-	await assert.rejects(prepareHelper(silent.ctx, build), { code: "helper-unavailable" });
-	assert.equal(silent.asked.length, 0);
-
 	writeFileSync(join(build.packageRoot, "source.txt"), "tampered\n");
-	const tampered = context(true);
-	await assert.rejects(prepareHelper(tampered.ctx, build), { code: "helper-build-refused" });
-	assert.equal(tampered.asked.length, 0);
+	await assert.rejects(prepareHelper(context().ctx, build), { code: "helper-build-refused" });
 
 	build = checkout();
 	mkdirSync(join(build.packageRoot, ".swiftpm"));
-	const configured = context(true);
-	await assert.rejects(prepareHelper(configured.ctx, build), (error: Error & { code: string }) => error.code === "helper-build-refused" && /\.swiftpm/.test(error.message));
-	assert.equal(configured.asked.length, 0);
+	await assert.rejects(prepareHelper(context().ctx, build), (error: Error & { code: string }) => error.code === "helper-build-refused" && /\.swiftpm/.test(error.message));
 	rmSync(join(build.packageRoot, ".swiftpm"), { recursive: true });
 
-	const declined = context(false);
-	await assert.rejects(prepareHelper(declined.ctx, build), { code: "helper-unavailable" });
-	assert.equal(declined.asked.length, 1);
-	assert.equal(existsSync(join(build.packageRoot, "bin/helper")), false);
-
-	const approved = context(true);
-	await prepareHelper(approved.ctx, build);
-	assert.equal(approved.asked.length, 1);
+	const interactive = context();
+	await prepareHelper(interactive.ctx, build);
+	assert.equal(interactive.asked.length, 0);
 	assert.equal(existsSync(join(build.packageRoot, "bin/helper")), true);
-	const again = context(true);
+	assert.ok(interactive.widgets.some((lines) => lines?.[0]?.includes("1/2 Compiling helper")));
+	assert.equal(interactive.widgets.at(-1), undefined);
+
+	rmSync(join(build.packageRoot, "bin/helper"));
+	const headless = context(false);
+	await prepareHelper(headless.ctx, build);
+	assert.equal(existsSync(join(build.packageRoot, "bin/helper")), true);
+	assert.equal(headless.widgets.length, 0);
+
+	const again = context();
 	await prepareHelper(again.ctx, build);
-	assert.equal(again.asked.length, 0);
+	assert.equal(again.widgets.length, 0);
 });
 
 test("a helper override must be an absolute path to an executable, so a relative name is never run", async () => {
 	const build = checkout();
 	process.env.PI_CREDENTIALS_GATE_TEST = "helper";
-	await assert.rejects(prepareHelper(context(true).ctx, build), { code: "build-failed" });
+	await assert.rejects(prepareHelper(context().ctx, build), { code: "build-failed" });
 	process.env.PI_CREDENTIALS_GATE_TEST = "/usr/bin/true";
-	await prepareHelper(context(true).ctx, build);
+	await prepareHelper(context().ctx, build);
 	delete process.env.PI_CREDENTIALS_GATE_TEST;
 });
