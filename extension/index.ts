@@ -439,21 +439,23 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	async function start(ctx: ExtensionContext): Promise<void> {
+		const note = (text: string) => { if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-notice", [`pi-credentials: ${text}`]); };
 		try {
 			await prepareHelper(ctx);
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
-			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
+			if (stripped.length) note(`removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`);
 			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => {
 				setLeakReport(report);
 				const lines = describeLeaks(report);
 				if (lines && ctx.hasUI) pi.appendEntry("pi-credentials-leaks", { lines, run: currentRun });
 			}).catch(() => undefined);
-		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
+		} catch (error) { note((error as Error).message); }
 	}
 
 	pi.on("input", async (event, ctx) => {
 		await ready;
+		if (ctx.hasUI) for (const key of ["pi-credentials-build", "pi-credentials-notice"]) ctx.ui.setWidget(key, undefined);
 		try {
 			const result = await redactPieces([event.text]);
 			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);

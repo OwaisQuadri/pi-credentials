@@ -46,7 +46,7 @@ test("credential variables leave the Pi process and protected files stay unread"
 	process.env.LEAKED_KEY = "xxSECRETxx";
 	process.env.HARMLESS_SETTING = "plain-value";
 	const notes: string[] = [];
-	await handlers.session_start({}, { cwd: directory, ui: { notify: (text: string) => notes.push(text) } });
+	await handlers.session_start({}, { cwd: directory, hasUI: true, ui: { notify: () => undefined, setWidget: (_key: string, lines?: string[]) => { if (lines) notes.push(...lines); } } });
 	assert.equal(process.env.LEAKED_KEY, undefined);
 	assert.equal(process.env.HARMLESS_SETTING, "plain-value");
 	assert.match(notes.join("\n"), /LEAKED_KEY/);
