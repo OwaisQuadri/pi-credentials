@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { binaryPath, type BuildSpec } from "pi-compiled";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { binaryPath, ensureBuilt, isBuildNeeded, refusalReason, type BuildSpec } from "pi-compiled";
 
 export const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 export const helperBuild: BuildSpec = {
@@ -12,6 +15,24 @@ export const helperBuild: BuildSpec = {
 	overrideEnv: "PI_CREDENTIALS_HELPER",
 };
 export const helperPath = binaryPath(helperBuild);
+
+export async function prepareHelper(ctx: Pick<ExtensionContext, "hasUI" | "ui">, build: BuildSpec = helperBuild): Promise<void> {
+	if (build.overrideEnv && process.env[build.overrideEnv]) {
+		await ensureBuilt(build);
+		return;
+	}
+	if (!(await isBuildNeeded(build))) return;
+	const fix = `Run scripts/build.zsh in ${build.packageRoot}.`;
+	if (!ctx.hasUI) throw new HelperError("helper-unavailable", `The helper is missing or out of date. ${fix}`);
+	const refusal = (await refusalReason(build).catch((error: Error) => error.message))
+		|| (existsSync(join(build.packageRoot, ".swiftpm")) ? "remove .swiftpm, because SwiftPM reads its configuration, which Git does not track." : "");
+	if (refusal) throw new HelperError("helper-build-refused", `The helper is missing or out of date and was not built automatically: ${refusal} ${fix}`);
+	const isApproved = await ctx.ui.confirm("Build the pi-credentials helper?", `The helper is missing or out of date, usually after pi install or pi update. This builds and signs it from ${build.packageRoot}. Pi finishes starting when the build is done.`);
+	if (!isApproved) throw new HelperError("helper-unavailable", `The helper is missing or out of date. ${fix}`);
+	ctx.ui.notify("pi-credentials is building its helper.", "info");
+	await ensureBuilt(build);
+	ctx.ui.notify("pi-credentials built its helper.", "info");
+}
 
 export type Kind = "api-key" | "password" | "app-password" | "passcode";
 export const kinds: Kind[] = ["api-key", "password", "app-password", "passcode"];

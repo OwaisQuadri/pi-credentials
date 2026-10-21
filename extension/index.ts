@@ -7,8 +7,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { ensureBuilt, isBuildNeeded, refusalReason } from "pi-compiled";
-import { callHelper, describeLeaks, describeListing, HelperError, helperBuild, packageRoot, kinds, type Catalog, type Kind, type LeakReport } from "./helper.ts";
+import { callHelper, describeLeaks, describeListing, HelperError, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
 
 const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
@@ -434,17 +433,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 	pi.on("session_start", async (_event, ctx) => {
 		try {
-			if (await isBuildNeeded(helperBuild)) {
-				const fix = `Run scripts/build.zsh in ${packageRoot}.`;
-				if (!ctx.hasUI) throw new HelperError("helper-unavailable", `The helper is missing or out of date. ${fix}`);
-				const refusal = await refusalReason(helperBuild).catch((error: Error) => error.message);
-				if (refusal) throw new HelperError("helper-build-refused", `The helper is missing or out of date and was not built automatically: ${refusal} ${fix}`);
-				const isApproved = await ctx.ui.confirm("Build the pi-credentials helper?", `The helper is missing or out of date, usually after pi install or pi update. This builds and signs it from ${packageRoot}. Pi finishes starting when the build is done.`);
-				if (!isApproved) throw new HelperError("helper-unavailable", `The helper is missing or out of date. ${fix}`);
-				ctx.ui.notify("pi-credentials is building its helper.", "info");
-				await ensureBuilt(helperBuild);
-				ctx.ui.notify("pi-credentials built its helper.", "info");
-			}
+			await prepareHelper(ctx);
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
 			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
