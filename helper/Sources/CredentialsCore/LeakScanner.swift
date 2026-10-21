@@ -26,8 +26,17 @@ public struct LeakScanner: Sendable {
     KeyFormat(prefix: "github_pat_", minimumLength: 40),
     KeyFormat(prefix: "ghp_", minimumLength: 30),
     KeyFormat(prefix: "gho_", minimumLength: 30),
+    KeyFormat(prefix: "ghu_", minimumLength: 30),
+    KeyFormat(prefix: "ghs_", minimumLength: 30),
+    KeyFormat(prefix: "ghr_", minimumLength: 30),
     KeyFormat(prefix: "xoxb-", minimumLength: 30),
     KeyFormat(prefix: "xoxp-", minimumLength: 30),
+    KeyFormat(prefix: "xoxa-", minimumLength: 30),
+    KeyFormat(prefix: "xoxr-", minimumLength: 30),
+    KeyFormat(prefix: "hf_", minimumLength: 33),
+    KeyFormat(prefix: "AIza", minimumLength: 39),
+    KeyFormat(prefix: "sk_live_", minimumLength: 28),
+    KeyFormat(prefix: "rk_live_", minimumLength: 28),
   ]
 
   let redactor: Redactor
@@ -113,6 +122,26 @@ public struct LeakScanner: Sendable {
     }
   }
 
+  public func fingerprints(in values: [String]) -> Set<String> {
+    Set(values.flatMap { tokens(in: Data($0.utf8)).map { Self.fingerprint($0.token) } })
+  }
+
+  public func piAuthFingerprints(agentDirectory: String) -> Set<String> {
+    func strings(_ value: Any) -> [String] {
+      if let text = value as? String { return [text] }
+      if let list = value as? [Any] { return list.flatMap(strings) }
+      if let object = value as? [String: Any] { return object.values.flatMap(strings) }
+      return []
+    }
+    return fingerprints(
+      in: ["auth.json", "mcp-auth.json"].flatMap { file -> [String] in
+        guard let data = FileManager.default.contents(atPath: agentDirectory + "/" + file),
+          let json = try? JSONSerialization.jsonObject(with: data)
+        else { return [] }
+        return strings(json)
+      })
+  }
+
   static let scrubbedMark = Array("[cred-scrubbed:".utf8)
   static let unknownMark = Array("[cred:unknown-".utf8)
 
@@ -172,13 +201,23 @@ public struct LeakScanner: Sendable {
     return findings
   }
 
-  public func scrub(_ data: Data) -> Data {
-    var text = redactor.redact(String(decoding: data, as: UTF8.self), labelPrefix: "cred-scrubbed").text
-    var replaced = Set<String>()
-    for (token, prefix) in tokens(in: Data(text.utf8)) where replaced.insert(token).inserted {
-      text = text.replacingOccurrences(of: token, with: "[cred:unknown-\(prefix)\(Self.fingerprint(token))]")
+  public func scrub(_ text: String, labelPrefix: String) -> (text: String, names: [String], unknown: [String]) {
+    let known = redactor.redact(text, labelPrefix: labelPrefix)
+    var output = known.text
+    var unknown: [String] = []
+    var prefixes: [String: String] = [:]
+    for (token, prefix) in tokens(in: Data(output.utf8)) where prefixes[token] == nil {
+      unknown.append(token)
+      prefixes[token] = prefix
     }
-    return Data(text.utf8)
+    for token in unknown.sorted(by: { $0.count > $1.count }) {
+      output = output.replacingOccurrences(of: token, with: "[cred:unknown-\(prefixes[token] ?? "")\(Self.fingerprint(token))]")
+    }
+    return (output, known.names, unknown.map(Self.fingerprint))
+  }
+
+  public func scrub(_ data: Data) -> Data {
+    Data(scrub(String(decoding: data, as: UTF8.self), labelPrefix: "cred-scrubbed").text.utf8)
   }
 }
 

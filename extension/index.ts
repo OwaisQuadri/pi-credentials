@@ -185,6 +185,23 @@ function describeProcess(result: ProcessResult): string {
 	return [`Exit status ${result.status}`, ...notes, result.stdout && `stdout:\n${result.stdout}`, result.stderr && `stderr:\n${result.stderr}`].filter(Boolean).join("\n");
 }
 
+interface Redaction {
+	text: string;
+	redacted: string[];
+	unknown?: string[];
+	unavailable: string[];
+}
+
+async function redactPieces(pieces: string[]): Promise<{ pieces: string[]; unavailable: string[] } | undefined> {
+	let separator = `\u0000${randomUUID()}\u0000`;
+	while (pieces.some((piece) => piece.includes(separator))) separator = `\u0000${randomUUID()}\u0000`;
+	const result = await callHelper<Redaction>("redact", { text: pieces.join(separator) }, AbortSignal.timeout(10_000));
+	if (!result.redacted.length && !result.unknown?.length && !result.unavailable.length) return undefined;
+	const redacted = result.text.split(separator);
+	if (redacted.length !== pieces.length) throw new Error("redaction changed its structure.");
+	return { pieces: redacted, unavailable: result.unavailable };
+}
+
 async function stripCredentialVariables(): Promise<string[]> {
 	const names = Object.keys(process.env).filter((name) => (process.env[name]?.length ?? 0) >= 8);
 	if (!names.length) return [];
@@ -193,7 +210,7 @@ async function stripCredentialVariables(): Promise<string[]> {
 	if (!result.redacted.length) return [];
 	const values = result.text.split(separator);
 	if (values.length !== names.length) return [];
-	const stripped = names.filter((name, index) => values[index] !== process.env[name]);
+	const stripped = names.filter((_name, index) => result.redacted.some((credential) => values[index].includes(`[cred:${credential}]`)));
 	for (const name of stripped) delete process.env[name];
 	return stripped;
 }
@@ -438,6 +455,35 @@ export default function piCredentials(pi: ExtensionAPI) {
 		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
 	});
 
+	pi.on("input", async (event, ctx) => {
+		try {
+			const result = await redactPieces([event.text]);
+			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);
+			if (!result || result.pieces[0] === event.text) return { action: "continue" };
+			ctx.ui.notify("pi-credentials replaced a credential in your message before sending it.", "warning");
+			return { action: "transform", text: result.pieces[0], images: event.images };
+		} catch (error) {
+			ctx.ui.notify(`pi-credentials did not send this message because it could not check it for credentials: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return { action: "handled" };
+		}
+	});
+
+	pi.on("tool_call", async (event) => {
+		try {
+			const text = JSON.stringify(event.input);
+			const result = await redactPieces([text]);
+			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);
+			if (!result || result.pieces[0] === text) return undefined;
+			const redacted = JSON.parse(result.pieces[0]);
+			const input = event.input as Record<string, unknown>;
+			for (const key of Object.keys(input)) delete input[key];
+			Object.assign(input, redacted);
+		} catch (error) {
+			return { block: true, reason: `pi-credentials could not check this call for credentials: ${error instanceof Error ? error.message : String(error)}` };
+		}
+		return undefined;
+	});
+
 	pi.on("tool_call", async (event, ctx) => {
 		if (!["read", "edit", "grep"].includes(event.toolName)) return undefined;
 		const input = event.input as { path?: unknown; glob?: unknown };
@@ -629,21 +675,22 @@ export default function piCredentials(pi: ExtensionAPI) {
 			const structured = serialize(event.structuredContent);
 			const details = serialize(event.details);
 			const pieces = [...texts, structured ?? "", details ?? ""];
-			let separator = `\u0000${randomUUID()}\u0000`;
-			while (pieces.some((piece) => piece.includes(separator))) separator = `\u0000${randomUUID()}\u0000`;
-			const result = await callHelper<{ text: string; redacted: string[]; unavailable: string[] }>("redact", { text: pieces.join(separator) }, AbortSignal.timeout(10_000));
-			if (!result.redacted.length && !result.unavailable.length) return undefined;
-			const redacted = result.text.split(separator);
-			if (redacted.length !== pieces.length) return withheld("redaction changed its structure.");
+			const result = await redactPieces(pieces);
+			if (!result) return undefined;
+			const redacted = result.pieces;
 			let index = 0;
 			const content = parts.map((part) => part.type === "text" ? { ...part, text: redacted[index++] } : part);
-			if (result.unavailable.length) content.push({ type: "text", text: `pi-credentials could not check this output for: ${result.unavailable.join(", ")}.` });
-			const parse = (text: string | undefined, original: string | undefined) => {
-				if (original === undefined) return undefined;
-				try { return JSON.parse(text ?? ""); }
-				catch { return undefined; }
-			};
-			return { content, structuredContent: parse(redacted[index], structured), details: details === undefined ? undefined : parse(redacted[index + 1], details) ?? {} };
+			if (result.unavailable.length) return withheld(`it could not check this output for ${result.unavailable.join(", ")}. Unlock the Keychain, or delete those credentials.`);
+			const parse = (text: string | undefined, original: string | undefined) => original === undefined ? undefined : JSON.parse(text ?? "");
+			let structuredContent: unknown;
+			let parsedDetails: unknown;
+			try {
+				structuredContent = parse(redacted[index], structured);
+				parsedDetails = parse(redacted[index + 1], details);
+			} catch {
+				return withheld("redaction broke its structured output.");
+			}
+			return { content, structuredContent: structuredContent as typeof event.structuredContent, details: parsedDetails };
 		} catch (error) {
 			return withheld(`redaction failed: ${error instanceof Error ? error.message : String(error)}`);
 		}

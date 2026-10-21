@@ -634,13 +634,17 @@ func run(_ command: String, _ input: Input) async throws {
 
   case "redact":
     let redaction = redactionValues(catalog)
-    let result = Redactor(values: redaction.values).redact(try required(input.text, "text"))
+    let scanner = LeakScanner(redactor: Redactor(values: redaction.values))
+    let result = scanner.scrub(try required(input.text, "text"), labelPrefix: "cred")
     struct Output: Encodable {
       var text: String
       var redacted: [String]
+      var unknown: [String]
       var unavailable: [String]
     }
-    emit(Output(text: result.text, redacted: result.names, unavailable: redaction.unavailable))
+    emit(
+      Output(
+        text: result.text, redacted: result.names, unknown: result.unknown, unavailable: redaction.unavailable))
 
   default:
     throw CredentialError("unknown-command", "Unknown command '\(command)'.")

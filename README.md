@@ -164,6 +164,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 ```
 
 - **Known and Unknown.** Known credentials are registered. Unknown ones match a key format but no registered value; the scanner cannot tell whose they are, so it only counts them. Registering a key that is still yours makes its past leaks Known.
+- **Pi sign-in is not a leak.** Keys that Pi saved from `/login` in `auth.json` or from `/mcp` in `mcp-auth.json` are not counted and do not cause the warning. Redaction and `/cred scrub` still replace them.
 
 - **How you resolve it.** A new value for a registered credential resolves its old leaks by itself: the scan compares each finding with the current value. `/cred edit <name>` with the value field does this in one step. `/cred rotated` opens a picker. `/cred rotated <name>` clears a credential's warnings without a new value. `/cred rotated <prefix>`, such as `sk-ant-`, clears every Unknown key of that format; a fingerprint clears one key; `/cred rotated all` clears everything. Each requires Touch ID. Clearing a registered credential also hides its old value when a later scan finds it as an Unknown key. A warning returns only when the scan finds the key in a session where it was not found before the mark.
 - **Optional cleanup.** `/cred scrub` rewrites the matches in saved sessions to `[cred-scrubbed:name]` or `[cred:unknown-<prefix><fingerprint>]`. It requires Touch ID and refuses while a registered `api-key` or `app-password` credential cannot be read from the Keychain. It keeps each file's modification time, and skips the current session and sessions changed in the last 10 minutes. Scrubbing does not resolve a warning, because the key can still work; a new value or `/cred rotated` does.
@@ -177,7 +178,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 | Catalog and grants inside the helper's Keychain storage, changed only after Touch ID | Enforced by macOS |
 | Helper and extension installed where the scope guard blocks agent writes | Enforced by Pi hooks |
 | Command guard blocks `security -w`, `security -g`, `dump-keychain`, and `.env` reads | Soft: blocks direct routes only |
-| Redaction of every tool result: each registered `api-key` and `app-password` of 8 or more characters becomes `[cred:name]` | Soft: backstop |
+| Redaction of your messages, tool call arguments, and tool results with the `/cred scrub` policy: each registered `api-key` and `app-password` of 8 or more characters becomes `[cred:name]`, and an unregistered key format becomes `[cred:unknown-<prefix><fingerprint>]` | Soft: backstop |
 | Credentials removed from shell startup environment variables | Required for the boundary to mean anything |
 
 ## Limits
@@ -189,8 +190,9 @@ The broker scans saved chat history for credentials that leaked before redaction
 - **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. The startup build refuses uncommitted changes, but an agent that can commit to the installed clone, or put a program named `swift` on your `PATH`, can still get its code built and signed when you approve the build. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
 - **Project scope is advisory against an agent that can run the helper.** The helper reads Git remotes from the directory it is given, and an agent can give it any directory. The command guard should block direct helper calls from the shell.
 - Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes. Other encoders, partial values, and transformed values get through.
+- Redaction checks text only. A credential shown inside an image, in your message or in a tool result, reaches the model.
 - Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values and never writes them to `.env` files. They can still reach output through the app that `cred_type` types into, or a command that `cred_sudo` runs.
-- `redact` and `request` list credentials that they could not read under `unavailable`. Output can still contain those values.
+- `redact` and `request` list credentials that they could not read under `unavailable`. The extension then withholds the tool result, holds back your message, or blocks the tool call. Output from a direct helper call outside Pi can still contain those values.
 
 ## Not included
 
@@ -214,7 +216,7 @@ When a credential is not granted and you are present, `cred_request`, `cred_type
 
 The `read`, `edit`, and `grep` tools refuse `.env` and `.env.*` files, except `.example`, `.sample`, `.template`, and `.dist`, and Pi's `auth.json` and `mcp-auth.json`. The extension resolves the path as Pi does, also checks the trimmed form, follows symlinks, and ignores case. Before each `grep`, the extension lists the files that ripgrep would search with the same path, glob, and hidden-file settings as Pi, and the same ripgrep binary. The listing reads your ripgrep configuration, as Pi's `grep` does. It refuses the call when any listed file is protected, when the list takes longer than 10 seconds, or when ripgrep cannot list the path. The check skips a folder that ripgrep cannot read; Pi's `grep` cannot search it either. The command guard refuses the same reads in the shell.
 
-Every tool result from a tool that runs, including its structured content and details, passes through `redact` before the model sees it or the session saves it. If redaction fails or takes more than 10 seconds, the extension withholds the output and returns an error. Output from shell commands that you run yourself with `!` is not a tool result, so it is not redacted. Neither are refusals that Pi returns before a tool runs, such as an unknown tool or invalid arguments. Progress that a tool streams while it runs is shown unredacted; only the final result is redacted.
+Every tool result from a tool that runs, including its structured content and details, passes through `redact` before the model sees it or the session saves it. If redaction fails or takes more than 10 seconds, the extension withholds the output and returns an error. Your messages and the arguments of each tool call pass through `redact` too. If that fails, or a registered credential cannot be read from the Keychain, the extension withholds the tool result, does not send the message, or blocks the call. `redact` and `/cred scrub` use one policy: the same registered values and the same key formats. Output from shell commands that you run yourself with `!` is not a tool result, so it is not redacted. Neither are refusals that Pi returns before a tool runs, such as an unknown tool or invalid arguments. Progress that a tool streams while it runs is shown unredacted; only the final result is redacted.
 
 ## Helper
 
