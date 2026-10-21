@@ -474,7 +474,10 @@ export default function piCredentials(pi: ExtensionAPI) {
 			const result = await redactPieces([text]);
 			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);
 			if (!result || result.pieces[0] === text) return undefined;
-			Object.assign(event.input, JSON.parse(result.pieces[0]));
+			const redacted = JSON.parse(result.pieces[0]);
+			const input = event.input as Record<string, unknown>;
+			for (const key of Object.keys(input)) delete input[key];
+			Object.assign(input, redacted);
 		} catch (error) {
 			return { block: true, reason: `pi-credentials could not check this call for credentials: ${error instanceof Error ? error.message : String(error)}` };
 		}

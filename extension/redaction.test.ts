@@ -141,6 +141,9 @@ test("messages and tool call arguments never reach the model with a registered k
 	const call = { toolName: "bash", input: { command: "echo SECRET" } };
 	assert.equal(await handlers.tool_call(call, ctx), undefined);
 	assert.deepEqual(call.input, { command: "echo [cred:key]" });
+	const keyed = { toolName: "bash", input: { SECRET: 1 } };
+	await handlers.tool_call(keyed, ctx);
+	assert.deepEqual(keyed.input, { "[cred:key]": 1 });
 
 	writeFileSync(join(directory, "locked"), "");
 	assert.deepEqual(await handlers.input({ text: "clean" }, ctx), { action: "handled" });
