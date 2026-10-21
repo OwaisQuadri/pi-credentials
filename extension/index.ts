@@ -439,7 +439,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	async function start(ctx: ExtensionContext): Promise<void> {
-		const note = (text: string) => { if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-notice", [`pi-credentials: ${text}`]); };
+		const note = (text?: string) => { try { if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-notice", text === undefined ? undefined : [`pi-credentials: ${text}`]); } catch {} };
+		note();
 		try {
 			await prepareHelper(ctx);
 			await refresh(ctx.cwd);
@@ -463,7 +464,9 @@ export default function piCredentials(pi: ExtensionAPI) {
 			ctx.ui.notify("pi-credentials replaced a credential in your message before sending it.", "warning");
 			return { action: "transform", text: result.pieces[0], images: event.images };
 		} catch (error) {
-			ctx.ui.notify(`pi-credentials did not send this message because it could not check it for credentials: ${error instanceof Error ? error.message : String(error)}`, "error");
+			const reason = `did not send this message because it could not check it for credentials: ${error instanceof Error ? error.message : String(error)}`;
+			if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-notice", [`pi-credentials: ${reason}`]);
+			else ctx.ui.notify(`pi-credentials ${reason}`, "error");
 			return { action: "handled" };
 		}
 	});

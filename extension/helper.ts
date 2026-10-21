@@ -27,12 +27,12 @@ export async function prepareHelper(ctx: Pick<ExtensionContext, "hasUI" | "ui">,
 	const refusal = (await refusalReason(build).catch((error: Error) => error.message))
 		|| (existsSync(join(build.packageRoot, ".swiftpm")) ? "remove .swiftpm, because SwiftPM reads its configuration, which Git does not track." : "");
 	if (refusal) throw new HelperError("helper-build-refused", `The helper is missing or out of date and was not built automatically: ${refusal} ${fix}`);
-	const show = (text: string) => { if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-build", [`pi-credentials helper: ${text}`]); };
+	const show = (text?: string) => { try { if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-build", text === undefined ? undefined : [`pi-credentials helper: ${text}`]); } catch {} };
 	show("starting the build");
 	try {
 		await ensureBuilt(build, { onProgress: (progress) => show(progressBar(progress)) });
 	} catch (error) {
-		if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-build", undefined);
+		show();
 		throw error;
 	}
 	show("built and signed.");

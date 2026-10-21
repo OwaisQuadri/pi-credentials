@@ -148,6 +148,12 @@ test("messages and tool call arguments never reach the model with a registered k
 	writeFileSync(join(directory, "locked"), "");
 	assert.deepEqual(await handlers.input({ text: "clean" }, ctx), { action: "handled" });
 	assert.match(notes.at(-1) ?? "", /could not read key/);
+	const widgets: Array<[string, string[] | undefined]> = [];
+	const ui = { cwd: directory, hasUI: true, ui: { notify: () => undefined, setWidget: (key: string, lines?: string[]) => { widgets.push([key, lines]); } } };
+	assert.deepEqual(await handlers.input({ text: "clean" }, ui), { action: "handled" });
+	assert.deepEqual(widgets.slice(0, 2), [["pi-credentials-build", undefined], ["pi-credentials-notice", undefined]]);
+	assert.equal(widgets[2][0], "pi-credentials-notice");
+	assert.match(widgets[2][1]?.[0] ?? "", /could not read key/);
 	assert.equal((await handlers.tool_call({ toolName: "bash", input: { command: "ls" } }, ctx))?.block, true);
 	assert.equal((await handlers.tool_result({ content: [{ type: "text", text: "clean" }] }, ctx)).isError, true);
 	rmSync(join(directory, "locked"));
