@@ -32,7 +32,6 @@ func agentDirectory() -> String {
 
 func sessionsRoot() -> String { standardPath(agentDirectory() + "/sessions") }
 
-
 func scanStatePath() -> String { credDirectory() + "/scan.json" }
 
 func loadScanState() -> ScanState {
