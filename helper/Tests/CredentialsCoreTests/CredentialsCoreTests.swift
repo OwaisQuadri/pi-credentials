@@ -87,6 +87,25 @@ let catalog = Catalog(
   #expect(redactor.redact("code 1234567").text == "code 1234567")
 }
 
+@Test func shortActivePasswordCannotEscapeWithoutChangingGlobalRedactionPolicy() {
+  let global = Redactor(values: [("short", "a/+")])
+  let active = global.includingActionSecret(name: "active", value: "a/+")
+  #expect(Redactor.minimumLength == 8)
+  #expect(Redactor.redactedKinds == [.apiKey, .appPassword])
+  #expect(global.redact("a/+").text == "a/+")
+  for form in ["a/+", "a\\/+", "YS8r", "a%2F%2B", "a%2f%2b"] {
+    #expect(active.redact(form).text == "[cred:active]")
+  }
+  let combined = Redactor(values: [("long", "ordinary-secret-123")])
+    .includingActionSecret(name: "active", value: "a/+")
+  #expect(combined.longestForm >= Data("ordinary-secret-123".utf8).base64EncodedString().utf8.count)
+  let cutoff = 1_000_000
+  let text = String(repeating: "x", count: cutoff - 1) + "a%2F%2B"
+  let buffered = String(decoding: Data(text.utf8).prefix(cutoff + combined.longestForm), as: UTF8.self)
+  let redacted = Data(combined.redact(buffered).text.utf8).prefix(cutoff)
+  #expect(!String(decoding: redacted, as: UTF8.self).contains("a%"))
+}
+
 @Test func leakScanFindsRegisteredAndUnknownKeysOnly() {
   let registered = "sk-or-v1-Zq8Wm3Rt7Yp2Lk5Hn9Bv4Cx6Dj1Fg0Ss8Ee3Aa7Uu2Ii5Oo9"
   let unknown = "lin_api_Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUi"

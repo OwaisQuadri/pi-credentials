@@ -301,6 +301,14 @@ func runSudo(_ command: [String], value: String, cwd: String?, timeout: TimeInte
   return result
 }
 
+func runSSHSudo(
+  _ command: SSHSudoCommand, value: String, cwd: String?, timeout: TimeInterval, redactor: Redactor
+) throws -> ProcessResult {
+  try runProcess(
+    "/usr/bin/ssh", command.sshArguments, input: Data((value + "\n").utf8), cwd: cwd,
+    timeout: timeout, redactor: redactor)
+}
+
 func describeCommand(_ command: [String]) -> String {
   command.map { argument in
     let isPlain =

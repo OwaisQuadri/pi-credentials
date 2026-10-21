@@ -37,6 +37,15 @@ public struct Redactor: Sendable {
     self.forms = forms.sorted { $0.0.count > $1.0.count }
   }
 
+  public func includingActionSecret(name: String, value: String) -> Redactor {
+    let active = Redactor(values: [(name, value)], minimumLength: 1)
+    return Redactor(forms: (forms + active.forms).sorted { $0.text.count > $1.text.count })
+  }
+
+  private init(forms: [(text: String, label: String)]) {
+    self.forms = forms
+  }
+
   static func lowercaseEscapes(_ text: String) -> String {
     var output = ""
     var remaining = 0

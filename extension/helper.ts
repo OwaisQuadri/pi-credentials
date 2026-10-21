@@ -120,7 +120,11 @@ export function callHelper<T>(command: string, input: Record<string, unknown>, s
 			let parsed: { error?: { code: string; message: string } } & T;
 			try { parsed = JSON.parse(output); }
 			catch { return reject(new HelperError("helper-output", "pi-credentials helper returned invalid output.")); }
-			if (parsed.error) return reject(new HelperError(parsed.error.code, parsed.error.message));
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return reject(new HelperError("helper-output", "pi-credentials helper returned invalid output."));
+			if (parsed.error) {
+				if (typeof parsed.error !== "object" || typeof parsed.error.code !== "string" || typeof parsed.error.message !== "string") return reject(new HelperError("helper-output", "pi-credentials helper returned invalid output."));
+				return reject(new HelperError(parsed.error.code, parsed.error.message));
+			}
 			resolve(parsed);
 		});
 		child.stdin.end(JSON.stringify(input));

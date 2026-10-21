@@ -32,6 +32,7 @@ struct Input: Decodable {
   var timeoutSeconds: Double?
   var project: String?
   var operation: String?
+  var sshTarget: String?
 }
 
 struct Listing: Encodable {
@@ -103,7 +104,7 @@ func lockCatalog() throws {
 
 func logUse(
   _ input: Input, groups: [String], projects: [String] = [], action: String, target: String, result: String,
-  isRefused: Bool = false
+  isRefused: Bool = false, redactor: Redactor? = nil
 ) {
   let directory = credDirectory()
   var entry: [String: String] = [
@@ -113,6 +114,7 @@ func logUse(
     "session": input.session ?? "", "result": result,
   ]
   if isRefused { entry["refused"] = "true" }
+  if let redactor { entry = entry.mapValues { redactor.redact($0).text } }
   guard var line = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys])
   else { return }
   line.append(UInt8(ascii: "\n"))
@@ -471,14 +473,20 @@ func run(_ command: String, _ input: Input) async throws {
       throw error
     }
 
-  case "notarize", "sudo", "type":
+  case "notarize", "sudo", "ssh-sudo", "type":
     let name = try required(input.name, "name")
-    let kinds: [Kind] = command == "notarize" ? [.appPassword] : command == "sudo" ? [.password] : [.password, .passcode]
-    let target =
+    let isRemote = command == "ssh-sudo"
+    let kinds: [Kind] = command == "notarize" ? [.appPassword] : (command == "sudo" || isRemote) ? [.password] : [.password, .passcode]
+    var target =
       command == "type" ? (input.app ?? "?") : describeCommand(input.arguments ?? []).prefix(200).description
+    if isRemote { target = "unvalidated remote request" }
+    var actionRedactor: Redactor?
+    var isDispatched = false
     func refuse(_ error: CredentialError) -> CredentialError {
-      logUse(input, groups: projectGroups, projects: projectIDs, action: command, target: target, result: error.code, isRefused: true)
-      return error
+      let safe = actionRedactor.map { CredentialError(error.code, $0.redact(error.description).text) } ?? error
+      logUse(input, groups: projectGroups, projects: projectIDs, action: command, target: target, result: safe.code,
+        isRefused: !isDispatched, redactor: actionRedactor)
+      return safe
     }
     guard let credential = catalog.credentials[name] else {
       throw refuse(CredentialError("unknown-credential", "No registered credential is named '\(name)'."))
@@ -496,6 +504,22 @@ func run(_ command: String, _ input: Input) async throws {
     }
     do {
       var resolved: [String] = []
+      var remote: SSHSudoCommand?
+      if isRemote {
+        let validated = try SSHSudoCommand(
+          target: try required(input.sshTarget, "sshTarget"),
+          arguments: try required(input.arguments, "arguments"))
+        guard (input.timeoutSeconds ?? 600).isFinite else {
+          throw CredentialError("invalid-arguments", "Remote timeout must be finite.")
+        }
+        let subject = "credential \(describeCommand([name])); SSH \(describeCommand([validated.target])); remote cwd /; \(describeCommand(validated.arguments))"
+        guard subject.count <= 400 else {
+          throw CredentialError("command-too-long", "The remote approval is too long to show in full.")
+        }
+        target = subject
+        try Keychain.authenticateOwner(reason: "run as root: \(subject)")
+        remote = validated
+      }
       if command == "sudo" {
         let arguments = try required(input.arguments, "arguments")
         guard let program = arguments.first, !program.isEmpty else {
@@ -511,8 +535,31 @@ func run(_ command: String, _ input: Input) async throws {
       }
       let value = try Keychain.value(of: credential)
       let redaction = redactionValues(catalog)
-      let redactor = Redactor(values: redaction.values + [(name, value)])
+      var redactor = Redactor(values: redaction.values + [(name, value)])
+      if isRemote {
+        redactor = redactor.includingActionSecret(name: name, value: value)
+        actionRedactor = redactor
+        guard !value.isEmpty, !value.contains("\0"), !value.contains("\r"), !value.contains("\n") else {
+          throw CredentialError("invalid-password", "The selected password cannot be used for remote validation.")
+        }
+      }
       switch command {
+      case "ssh-sudo":
+        guard let remote else {
+          throw CredentialError("invalid-arguments", "Missing validated remote command.")
+        }
+        let timeout = min(max(input.timeoutSeconds ?? 600, 1), 3600)
+        isDispatched = true
+        let result = try Cancellation.shared.guarded {
+          try runSSHSudo(remote, value: value, cwd: input.cwd, timeout: timeout, redactor: redactor)
+        }
+        guard !Cancellation.shared.isCancelled else {
+          throw CredentialError("ssh-sudo-interrupted", "Remote completion was not confirmed. Remote privileged work may still be running.")
+        }
+        let isUncertain = result.isTimedOut || result.status == -1 || result.status == 255
+        logUse(input, groups: projectGroups, projects: projectIDs, action: command, target: target,
+          result: isUncertain ? "uncertain" : String(result.status), redactor: redactor)
+        emit(result)
       case "notarize":
         let arguments = try required(input.arguments, "arguments")
         let result = try Cancellation.shared.guarded {
@@ -537,6 +584,9 @@ func run(_ command: String, _ input: Input) async throws {
       }
     } catch let error as CredentialError {
       throw refuse(error)
+    } catch {
+      guard isRemote else { throw error }
+      throw refuse(CredentialError("ssh-sudo-failed", "The remote action failed. Remote completion was not confirmed. Remote privileged work may still be running."))
     }
 
   case "env":

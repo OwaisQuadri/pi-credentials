@@ -10,6 +10,10 @@ const fake = join(directory, "helper");
 writeFileSync(fake, `#!/bin/sh
 input=$(cat)
 case "$1" in
+  sudo|ssh-sudo)
+    printf '%s\\n' "$1" >> "${directory}/sudo-calls"
+    printf '%s' "$input" > "${directory}/sudo.json"
+    if [ -e "${directory}/sudo-response" ]; then cat "${directory}/sudo-response"; else echo '{"status":0,"stdout":"fixture","stderr":"","isTruncated":false,"isTimedOut":false}'; fi ;;
   add)
     printf '%s' "$input" > "${directory}/add.json"
     echo '{"added":true}' ;;
@@ -231,6 +235,59 @@ test("messages and tool call arguments never reach the model with a registered k
 	assert.deepEqual(await handlers.input({ text: "use SECRET now" }, ctx), { action: "handled" });
 	assert.equal((await handlers.tool_call({ toolName: "bash", input: { command: "echo SECRET" } }, ctx))?.block, true);
 	rmSync(join(directory, "broken"));
+});
+
+test("remote sudo never falls back locally and preserves admission refusals", async () => {
+	const ctx = { cwd: directory, hasUI: true, sessionManager: { getSessionId: () => "fixture-session" }, ui: { setStatus: () => undefined, select: async () => { throw new Error("must not offer grant"); } } };
+	const input = { name: "password", command: ["/usr/bin/id"] };
+	const response = join(directory, "sudo-response");
+	const calls = () => readFileSync(join(directory, "sudo-calls"), "utf8").trim().split("\n");
+	const execute = (request: object, signal?: AbortSignal, context = ctx) => tools.cred_sudo.execute("fixture", request, signal, undefined, context);
+	await assert.rejects(execute(input, undefined, { ...ctx, hasUI: false }), /No user is present/);
+	const local = await execute(input);
+	assert.equal(local.isError, false);
+	assert.equal(local.content[0].text, "Exit status 0\nstdout:\nfixture");
+	assert.deepEqual(JSON.parse(readFileSync(join(directory, "sudo.json"), "utf8")), { cwd: directory, session: "fixture-session", name: "password", arguments: input.command });
+	await execute({ ...input, sshTarget: "fixture-alias" });
+	assert.deepEqual(JSON.parse(readFileSync(join(directory, "sudo.json"), "utf8")), { cwd: directory, session: "fixture-session", name: "password", arguments: input.command, sshTarget: "fixture-alias" });
+	for (const [code, message] of [["invalid-arguments", "empty target refused"], ["wrong-kind", "wrong kind"], ["auth-denied", "approval denied"], ["unknown-command", "unknown operation"]]) {
+		writeFileSync(response, JSON.stringify({ error: { code, message } }));
+		await assert.rejects(execute({ ...input, sshTarget: "" }), code === "unknown-command" ? /Rebuild.*helper/ : new RegExp(message));
+	}
+	assert.deepEqual(calls(), ["sudo", "ssh-sudo", "ssh-sudo", "ssh-sudo", "ssh-sudo", "ssh-sudo"]);
+	rmSync(response);
+});
+
+test("remote interruption and malformed responses never claim stopped or trigger retries", async () => {
+	const statuses: unknown[] = [];
+	const ctx = { cwd: directory, hasUI: true, sessionManager: { getSessionId: () => "fixture-session" }, ui: { setStatus: (...args: unknown[]) => statuses.push(args[1]) } };
+	const input = { name: "password", command: ["/usr/bin/id"], sshTarget: "fixture-alias" };
+	const valid = { status: 0, stdout: "", stderr: "", isTruncated: false, isTimedOut: false };
+	const response = join(directory, "sudo-response");
+	const calls = () => readFileSync(join(directory, "sudo-calls"), "utf8").trim().split("\n").length;
+	for (const value of [{ ...valid, isTimedOut: true }, { ...valid, status: -1 }, { ...valid, status: 255 }, { ...valid, status: 1.5 }, { ...valid, isTimedOut: "false" }, {}, null, [], "invalid shape", { error: true }, { error: { code: "wrong-kind", message: 3 } },
+		...["ssh-sudo-interrupted", "cancelled", "aborted", "timeout", "helper-output", "helper-unavailable"].map((code) => ({ error: { code, message: "fixture" } }))]) {
+		writeFileSync(response, JSON.stringify(value));
+		const before = calls();
+		const result = await tools.cred_sudo.execute("fixture", input, undefined, undefined, ctx);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /Remote completion was not confirmed.*may still be running/);
+		assert.doesNotMatch(result.content[0].text, /stopped|successful/i);
+		assert.equal(calls(), before + 1);
+		assert.equal(statuses.at(-1), undefined);
+	}
+	for (const text of ["invalid JSON", ""]) {
+		writeFileSync(response, text);
+		const result = await tools.cred_sudo.execute("fixture", input, undefined, undefined, ctx);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /Remote completion was not confirmed/);
+	}
+	const aborted = new AbortController();
+	aborted.abort();
+	const result = await tools.cred_sudo.execute("fixture", input, aborted.signal, undefined, ctx);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /Remote completion was not confirmed/);
+	rmSync(response);
 });
 
 test("cred_ask saves a secret handle once and refuses unknown handles", async () => {
