@@ -104,6 +104,18 @@ let catalog = Catalog(
   #expect(scanner.scan(Data("no keys here: sk-short".utf8)).isEmpty)
 }
 
+@Test func liveRedactionUsesTheSessionScrubPolicy() {
+  let registered = "sk-or-v1-Zq8Wm3Rt7Yp2Lk5Hn9Bv4Cx6Dj1Fg0Ss8Ee3Aa7Uu2Ii5Oo9"
+  let unknown = "hf_Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUiR"
+  let scanner = LeakScanner(redactor: Redactor(values: [("router", registered)]))
+  let text = "\(registered) and \(unknown)"
+  let live = scanner.scrub(text, labelPrefix: "cred")
+  let session = String(decoding: scanner.scrub(Data(text.utf8)), as: UTF8.self)
+  #expect(live.text == session.replacingOccurrences(of: "[cred-scrubbed:", with: "[cred:"))
+  #expect(live.names == ["router"] && live.unknown == [LeakScanner.fingerprint(unknown)])
+  #expect(scanner.fingerprints(in: ["{\"access\":\"\(unknown)\"}"]) == Set(scanner.scan(Data(text.utf8)).unknown.keys))
+}
+
 @Test func leakScanSkipsPlaceholderKeys() {
   let scanner = LeakScanner(redactor: Redactor(values: []))
   for text in ["sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sk-proj-your-key-goes-here-1234567890abcdefgh", "ghp_" + String(repeating: "A", count: 36)] {

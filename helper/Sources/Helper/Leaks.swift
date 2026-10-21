@@ -26,10 +26,25 @@ struct LeakReport: Encodable {
   var scanned: Int
 }
 
-func sessionsRoot() -> String {
-  standardPath(
-    (ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"] ?? NSHomeDirectory() + "/.pi/agent")
-      + "/sessions")
+func agentDirectory() -> String {
+  ProcessInfo.processInfo.environment["PI_CODING_AGENT_DIR"] ?? NSHomeDirectory() + "/.pi/agent"
+}
+
+func sessionsRoot() -> String { standardPath(agentDirectory() + "/sessions") }
+
+func piAuthStrings() -> [String] {
+  func strings(_ value: Any) -> [String] {
+    if let text = value as? String { return [text] }
+    if let list = value as? [Any] { return list.flatMap(strings) }
+    if let object = value as? [String: Any] { return object.values.flatMap(strings) }
+    return []
+  }
+  return ["auth.json", "mcp-auth.json"].flatMap { file -> [String] in
+    guard let data = FileManager.default.contents(atPath: agentDirectory() + "/" + file),
+      let json = try? JSONSerialization.jsonObject(with: data)
+    else { return [] }
+    return strings(json)
+  }
 }
 
 func scanStatePath() -> String { credDirectory() + "/scan.json" }
@@ -121,7 +136,9 @@ func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
   formatter.timeZone = .current
   var known: [String: (count: Int, last: Double)] = [:]
   var unknown: [String: (prefix: String, count: Int, last: Double)] = [:]
-  let currentValues = scannerFor(catalog).scanner.valueFingerprints
+  let scanner = scannerFor(catalog).scanner
+  let currentValues = scanner.valueFingerprints
+  let piAuth = scanner.fingerprints(in: piAuthStrings())
   for entry in state.files.values {
     for name in entry.findings.names where catalog.credentials[name] != nil {
       if let found = entry.findings.values?[name], let value = currentValues[name], found != value { continue }
@@ -129,7 +146,7 @@ func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
       let current = known[name] ?? (0, 0)
       known[name] = (current.count + 1, max(current.last, entry.mtime))
     }
-    for (fingerprint, prefix) in entry.findings.unknown {
+    for (fingerprint, prefix) in entry.findings.unknown where !piAuth.contains(fingerprint) {
       if let owner = entry.findings.registered?[fingerprint], currentValues[owner] != nil { continue }
       if let dismissed = catalog.dismissed?[fingerprint], entry.seen("key:" + fingerprint) < dismissed { continue }
       let current = unknown[fingerprint] ?? (prefix, 0, 0)
