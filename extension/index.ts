@@ -458,6 +458,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 	pi.on("input", async (event, ctx) => {
 		try {
 			const result = await redactPieces([event.text]);
+			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);
 			if (!result || result.pieces[0] === event.text) return { action: "continue" };
 			ctx.ui.notify("pi-credentials replaced a credential in your message before sending it.", "warning");
 			return { action: "transform", text: result.pieces[0], images: event.images };
@@ -471,6 +472,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 		try {
 			const text = JSON.stringify(event.input);
 			const result = await redactPieces([text]);
+			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);
 			if (!result || result.pieces[0] === text) return undefined;
 			Object.assign(event.input, JSON.parse(result.pieces[0]));
 		} catch (error) {
@@ -676,12 +678,16 @@ export default function piCredentials(pi: ExtensionAPI) {
 			let index = 0;
 			const content = parts.map((part) => part.type === "text" ? { ...part, text: redacted[index++] } : part);
 			if (result.unavailable.length) content.push({ type: "text", text: `pi-credentials could not check this output for: ${result.unavailable.join(", ")}.` });
-			const parse = (text: string | undefined, original: string | undefined) => {
-				if (original === undefined) return undefined;
-				try { return JSON.parse(text ?? ""); }
-				catch { return undefined; }
-			};
-			return { content, structuredContent: parse(redacted[index], structured), details: details === undefined ? undefined : parse(redacted[index + 1], details) ?? {} };
+			const parse = (text: string | undefined, original: string | undefined) => original === undefined ? undefined : JSON.parse(text ?? "");
+			let structuredContent: unknown;
+			let parsedDetails: unknown;
+			try {
+				structuredContent = parse(redacted[index], structured);
+				parsedDetails = parse(redacted[index + 1], details);
+			} catch {
+				return withheld("redaction broke its structured output.");
+			}
+			return { content, structuredContent: structuredContent as typeof event.structuredContent, details: parsedDetails };
 		} catch (error) {
 			return withheld(`redaction failed: ${error instanceof Error ? error.message : String(error)}`);
 		}

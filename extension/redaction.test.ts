@@ -19,7 +19,7 @@ case "$1" in
   list) echo '{"credentials":[{"name":"key","description":"","kind":"api-key","hosts":[],"apps":[],"grants":[],"isGranted":false}],"groups":{},"projectGroups":[]}' ;;
   redact)
     [ -e "${directory}/broken" ] && exit 1
-    printf '%s' "$input" | /usr/bin/python3 -c 'import json,sys; t=json.load(sys.stdin)["text"]; r=t.replace("SECRET","[cred:key]"); print(json.dumps({"text":r,"redacted":["key"] if r!=t else [],"unavailable":[]}))' ;;
+    printf '%s' "$input" | /usr/bin/python3 -c 'import json,os,sys; t=json.load(sys.stdin)["text"]; r=t.replace("SECRET","[cred:key]"); print(json.dumps({"text":r,"redacted":["key"] if r!=t else [],"unavailable":["key"] if os.path.exists("${directory}/locked") else []}))' ;;
 esac
 `);
 chmodSync(fake, 0o755);
@@ -31,7 +31,10 @@ const events: Record<string, (payload: unknown) => void> = {};
 const tools: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
 const { default: extension } = await import("./index.ts");
 extension({
-	on: (name: string, handler: Handler) => { handlers[name] = handler; },
+	on: (name: string, handler: Handler) => {
+		const previous = handlers[name];
+		handlers[name] = previous ? async (event, ctx) => (await previous(event, ctx)) ?? handler(event, ctx) : handler;
+	},
 	registerCommand: () => undefined,
 	events: { on: (channel: string, handler: (payload: unknown) => void) => { events[channel] = handler; }, emit: () => undefined },
 	registerEntryRenderer: () => undefined,
@@ -127,6 +130,28 @@ test("tool output never reaches the model with a registered key in it", async ()
 	assert.deepEqual(withheld.details, {});
 
 	assert.doesNotMatch(JSON.stringify(withheld), /SECRET/);
+	rmSync(join(directory, "broken"));
+});
+
+test("messages and tool call arguments never reach the model with a registered key in them", async () => {
+	const notes: string[] = [];
+	const ctx = { cwd: directory, ui: { notify: (text: string) => notes.push(text) } };
+	assert.deepEqual(await handlers.input({ text: "use SECRET now" }, ctx), { action: "transform", text: "use [cred:key] now", images: undefined });
+	assert.deepEqual(await handlers.input({ text: "clean" }, ctx), { action: "continue" });
+	const call = { toolName: "bash", input: { command: "echo SECRET" } };
+	assert.equal(await handlers.tool_call(call, ctx), undefined);
+	assert.deepEqual(call.input, { command: "echo [cred:key]" });
+
+	writeFileSync(join(directory, "locked"), "");
+	assert.deepEqual(await handlers.input({ text: "clean" }, ctx), { action: "handled" });
+	assert.match(notes.at(-1) ?? "", /could not read key/);
+	assert.equal((await handlers.tool_call({ toolName: "bash", input: { command: "ls" } }, ctx))?.block, true);
+	rmSync(join(directory, "locked"));
+
+	writeFileSync(join(directory, "broken"), "");
+	assert.deepEqual(await handlers.input({ text: "use SECRET now" }, ctx), { action: "handled" });
+	assert.equal((await handlers.tool_call({ toolName: "bash", input: { command: "echo SECRET" } }, ctx))?.block, true);
+	rmSync(join(directory, "broken"));
 });
 
 test("cred_ask saves a secret handle once and refuses unknown handles", async () => {

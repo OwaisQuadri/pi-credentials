@@ -126,6 +126,22 @@ public struct LeakScanner: Sendable {
     Set(values.flatMap { tokens(in: Data($0.utf8)).map { Self.fingerprint($0.token) } })
   }
 
+  public func piAuthFingerprints(agentDirectory: String) -> Set<String> {
+    func strings(_ value: Any) -> [String] {
+      if let text = value as? String { return [text] }
+      if let list = value as? [Any] { return list.flatMap(strings) }
+      if let object = value as? [String: Any] { return object.values.flatMap(strings) }
+      return []
+    }
+    return fingerprints(
+      in: ["auth.json", "mcp-auth.json"].flatMap { file -> [String] in
+        guard let data = FileManager.default.contents(atPath: agentDirectory + "/" + file),
+          let json = try? JSONSerialization.jsonObject(with: data)
+        else { return [] }
+        return strings(json)
+      })
+  }
+
   static let scrubbedMark = Array("[cred-scrubbed:".utf8)
   static let unknownMark = Array("[cred:unknown-".utf8)
 
@@ -189,9 +205,13 @@ public struct LeakScanner: Sendable {
     let known = redactor.redact(text, labelPrefix: labelPrefix)
     var output = known.text
     var unknown: [String] = []
-    for (token, prefix) in tokens(in: Data(output.utf8)) where !unknown.contains(token) {
+    var prefixes: [String: String] = [:]
+    for (token, prefix) in tokens(in: Data(output.utf8)) where prefixes[token] == nil {
       unknown.append(token)
-      output = output.replacingOccurrences(of: token, with: "[cred:unknown-\(prefix)\(Self.fingerprint(token))]")
+      prefixes[token] = prefix
+    }
+    for token in unknown.sorted(by: { $0.count > $1.count }) {
+      output = output.replacingOccurrences(of: token, with: "[cred:unknown-\(prefixes[token] ?? "")\(Self.fingerprint(token))]")
     }
     return (output, known.names, unknown.map(Self.fingerprint))
   }

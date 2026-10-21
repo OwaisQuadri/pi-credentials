@@ -116,6 +116,28 @@ let catalog = Catalog(
   #expect(scanner.fingerprints(in: ["{\"access\":\"\(unknown)\"}"]) == Set(scanner.scan(Data(text.utf8)).unknown.keys))
 }
 
+@Test func scrubLabelsAKeyThatExtendsAnotherKey() {
+  let short = "hf_Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUiR"
+  let long = short + "Zt4Wq"
+  let result = LeakScanner(redactor: Redactor(values: [])).scrub("\(short) then \(long)", labelPrefix: "cred")
+  #expect(!result.text.contains("Zt4Wq"))
+  #expect(Set(result.unknown) == [LeakScanner.fingerprint(short), LeakScanner.fingerprint(long)])
+}
+
+@Test func piSignInKeysAreFoundInAuthFiles() throws {
+  let key = "sk-ant-oat01-Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUiR4oP"
+  let mcp = "lin_api_Q7mZr2Kp9Lw4Vx8Nb3Jt6Hc1Fd5Gs0YeUi"
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try Data("{\"anthropic\":{\"type\":\"oauth\",\"access\":\"\(key)\"}}".utf8).write(to: directory.appendingPathComponent("auth.json"))
+  try Data("{\"linear\":[{\"token\":\"\(mcp)\"}]}".utf8).write(to: directory.appendingPathComponent("mcp-auth.json"))
+  let scanner = LeakScanner(redactor: Redactor(values: []))
+  #expect(scanner.piAuthFingerprints(agentDirectory: directory.path) == [LeakScanner.fingerprint(key), LeakScanner.fingerprint(mcp)])
+  #expect(!String(decoding: scanner.scrub(Data(key.utf8)), as: UTF8.self).contains(key))
+  #expect(scanner.piAuthFingerprints(agentDirectory: directory.path + "/missing").isEmpty)
+}
+
 @Test func leakScanSkipsPlaceholderKeys() {
   let scanner = LeakScanner(redactor: Redactor(values: []))
   for text in ["sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sk-proj-your-key-goes-here-1234567890abcdefgh", "ghp_" + String(repeating: "A", count: 36)] {

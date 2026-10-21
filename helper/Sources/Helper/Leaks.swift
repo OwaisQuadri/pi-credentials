@@ -32,20 +32,6 @@ func agentDirectory() -> String {
 
 func sessionsRoot() -> String { standardPath(agentDirectory() + "/sessions") }
 
-func piAuthStrings() -> [String] {
-  func strings(_ value: Any) -> [String] {
-    if let text = value as? String { return [text] }
-    if let list = value as? [Any] { return list.flatMap(strings) }
-    if let object = value as? [String: Any] { return object.values.flatMap(strings) }
-    return []
-  }
-  return ["auth.json", "mcp-auth.json"].flatMap { file -> [String] in
-    guard let data = FileManager.default.contents(atPath: agentDirectory() + "/" + file),
-      let json = try? JSONSerialization.jsonObject(with: data)
-    else { return [] }
-    return strings(json)
-  }
-}
 
 func scanStatePath() -> String { credDirectory() + "/scan.json" }
 
@@ -138,7 +124,7 @@ func report(_ state: ScanState, catalog: Catalog, scanned: Int) -> LeakReport {
   var unknown: [String: (prefix: String, count: Int, last: Double)] = [:]
   let scanner = scannerFor(catalog).scanner
   let currentValues = scanner.valueFingerprints
-  let piAuth = scanner.fingerprints(in: piAuthStrings())
+  let piAuth = scanner.piAuthFingerprints(agentDirectory: agentDirectory())
   for entry in state.files.values {
     for name in entry.findings.names where catalog.credentials[name] != nil {
       if let found = entry.findings.values?[name], let value = currentValues[name], found != value { continue }
