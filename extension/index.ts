@@ -617,8 +617,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 		description: "Run one command as root with a registered password. The user approves the exact command with Touch ID each time. Needs a user present.",
 		parameters: Type.Object({
 			name: Type.String({ description: "Registered password credential, such as the Mac login password." }),
-			command: Type.Array(Type.String(), { description: "Program and arguments, without sudo. Not run through a shell.", minItems: 1 }),
-			sshTarget: Type.Optional(Type.String({ description: "Trusted SSH alias or user@host. Remote program must be an absolute path; remote cwd is /." })),
+			command: Type.Array(Type.String(), { description: "Program and arguments, without sudo. Use an absolute program path for remote execution. The helper quotes remote arguments.", minItems: 1 }),
+			sshTarget: Type.Optional(Type.String({ description: "Trusted SSH alias or user@host. Remote execution requires /bin/zsh and an absolute program path. Remote cwd is /." })),
 			timeoutSeconds: Type.Optional(Type.Number({ description: "Default 600, at most 3600." })),
 		}, { additionalProperties: false }),
 		async execute(_id, input, signal, _update, ctx) {

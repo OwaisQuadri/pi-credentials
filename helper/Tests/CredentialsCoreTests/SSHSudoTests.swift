@@ -33,7 +33,7 @@ import Testing
   let parents = directory.appendingPathComponent("parents")
   let injection = directory.appendingPathComponent("injected")
   try """
-    #!/bin/sh
+    #!/bin/zsh -f
     printf '%s\\n' "$PPID" >> "$PARENTS"
     case "$1 $2" in
       '-n -k') [ "$MODE" != invalidation ] ;;
@@ -45,7 +45,7 @@ import Testing
     esac
     """.write(to: sudo, atomically: true, encoding: .utf8)
   try """
-    #!/bin/sh
+    #!/bin/zsh -f
     printf '%s\\0' "$@" > "$OUTPUT"
     if IFS= read -r leftover; then exit 90; fi
     for descriptor in 3 4 5 6 7 8 9; do
@@ -63,9 +63,9 @@ import Testing
     try? FileManager.default.removeItem(at: output)
     try? FileManager.default.removeItem(at: parents)
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/sh")
-    process.arguments = ["-c", text]
-    process.environment = ["MODE": mode, "OUTPUT": output.path, "PARENTS": parents.path, "PATH": "/usr/bin:/bin"]
+    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    process.arguments = ["-f", "-c", text]
+    process.environment = ["MODE": mode, "OUTPUT": output.path, "PARENTS": parents.path, "PATH": "/usr/bin:/bin", "HOME": directory.path, "ZDOTDIR": directory.path]
     let input = Pipe()
     process.standardInput = input
     process.standardOutput = FileHandle.nullDevice

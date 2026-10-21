@@ -31,18 +31,18 @@ public struct SSHSudoCommand: Sendable {
     ]
     let script = """
       cd / </dev/null || exit 1
-      trap 'status=$?; trap - 0; /usr/bin/sudo -n -k </dev/null; exit "$status"' 0
+      trap 'exitStatus=$?; trap - 0; /usr/bin/sudo -n -k </dev/null; exit "$exitStatus"' 0
       trap 'exit 129' HUP
       trap 'exit 130' INT
       trap 'exit 143' TERM
       /usr/bin/sudo -n -k </dev/null || exit 1
       /usr/bin/sudo -S -v -p '' || exit 1
       /usr/bin/sudo -n -- \(arguments.map(Self.quote).joined(separator: " ")) </dev/null
-      status=$?
-      exit "$status"
+      exitStatus=$?
+      exit "$exitStatus"
       """
     return ["-T"] + options.flatMap { ["-o", $0] }
-      + [target, "/bin/sh -c " + Self.quote(script)]
+      + [target, "/bin/zsh -f -c " + Self.quote(script)]
   }
 
   private static func quote(_ value: String) -> String {
