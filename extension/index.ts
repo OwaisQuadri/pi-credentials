@@ -677,7 +677,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 			const redacted = result.pieces;
 			let index = 0;
 			const content = parts.map((part) => part.type === "text" ? { ...part, text: redacted[index++] } : part);
-			if (result.unavailable.length) content.push({ type: "text", text: `pi-credentials could not check this output for: ${result.unavailable.join(", ")}.` });
+			if (result.unavailable.length) return withheld(`it could not check this output for ${result.unavailable.join(", ")}. Unlock the Keychain, or delete those credentials.`);
 			const parse = (text: string | undefined, original: string | undefined) => original === undefined ? undefined : JSON.parse(text ?? "");
 			let structuredContent: unknown;
 			let parsedDetails: unknown;

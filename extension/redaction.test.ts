@@ -146,6 +146,7 @@ test("messages and tool call arguments never reach the model with a registered k
 	assert.deepEqual(await handlers.input({ text: "clean" }, ctx), { action: "handled" });
 	assert.match(notes.at(-1) ?? "", /could not read key/);
 	assert.equal((await handlers.tool_call({ toolName: "bash", input: { command: "ls" } }, ctx))?.block, true);
+	assert.equal((await handlers.tool_result({ content: [{ type: "text", text: "clean" }] }, ctx)).isError, true);
 	rmSync(join(directory, "locked"));
 
 	writeFileSync(join(directory, "broken"), "");
