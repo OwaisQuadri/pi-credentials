@@ -45,6 +45,10 @@ public struct SSHSudoCommand: Sendable {
       + [target, "/bin/zsh -f -c " + Self.quote(script)]
   }
 
+  public static func normalizedStatus(_ status: Int32, terminationReason: Process.TerminationReason) -> Int32 {
+    terminationReason == .uncaughtSignal ? -1 : status
+  }
+
   private static func quote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
   }

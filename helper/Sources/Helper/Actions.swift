@@ -112,7 +112,8 @@ final class OutputBuffer: @unchecked Sendable {
 
 func runProcess(
   _ executable: String, _ arguments: [String], input: Data?, cwd: String?, timeout: TimeInterval,
-  redactor: Redactor, isCancellable: Bool = true, stop: ((pid_t, Int32) -> Void)? = nil
+  redactor: Redactor, isCancellable: Bool = true, stop: ((pid_t, Int32) -> Void)? = nil,
+  normalizeStatus: ((Int32, Process.TerminationReason) -> Int32)? = nil
 ) throws -> ProcessResult {
   if isCancellable && Cancellation.shared.isCancelled {
     throw CredentialError("cancelled", "The action was cancelled.")
@@ -178,8 +179,16 @@ func runProcess(
   }
   let (out, isOutTruncated) = text(buffers[0])
   let (err, isErrTruncated) = text(buffers[1])
+  let status: Int32
+  if process.isRunning {
+    status = -1
+  } else if let normalizeStatus {
+    status = normalizeStatus(process.terminationStatus, process.terminationReason)
+  } else {
+    status = process.terminationStatus
+  }
   return ProcessResult(
-    status: process.isRunning ? -1 : process.terminationStatus, stdout: out, stderr: err,
+    status: status, stdout: out, stderr: err,
     isTruncated: isOutTruncated || isErrTruncated, isTimedOut: isTimedOut)
 }
 
@@ -306,7 +315,7 @@ func runSSHSudo(
 ) throws -> ProcessResult {
   try runProcess(
     "/usr/bin/ssh", command.sshArguments, input: Data((value + "\n").utf8), cwd: cwd,
-    timeout: timeout, redactor: redactor)
+    timeout: timeout, redactor: redactor, normalizeStatus: SSHSudoCommand.normalizedStatus)
 }
 
 func describeCommand(_ command: [String]) -> String {

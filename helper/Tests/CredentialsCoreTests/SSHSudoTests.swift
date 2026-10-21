@@ -23,6 +23,29 @@ import Testing
   #expect(command.sshArguments.dropLast().last == command.target)
 }
 
+@Test func signalledSSHStatusCannotMasqueradeAsRemoteExitNine() throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  for (script, reason, expectedStatus) in [
+    ("exit 9", Process.TerminationReason.exit, Int32(9)),
+    ("kill -KILL $$", Process.TerminationReason.uncaughtSignal, Int32(-1)),
+  ] {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    process.arguments = ["-f", "-c", script]
+    process.environment = ["HOME": directory.path, "ZDOTDIR": directory.path, "PATH": "/usr/bin:/bin"]
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    process.waitUntilExit()
+    #expect(process.terminationStatus == 9)
+    #expect(process.terminationReason == reason)
+    #expect(SSHSudoCommand.normalizedStatus(process.terminationStatus, terminationReason: process.terminationReason) == expectedStatus)
+  }
+}
+
 @Test func remoteArgvCannotExecuteSyntaxOrReadLeftoverValidationInput() throws {
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
