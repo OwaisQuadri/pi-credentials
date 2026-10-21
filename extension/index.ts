@@ -7,7 +7,8 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { callHelper, describeLeaks, describeListing, HelperError, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
+import { callHelper, describeLeaks, describeListing, HelperError, helperBuild, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
+import { isBuildNeeded } from "pi-compiled";
 
 const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
@@ -432,8 +433,9 @@ export default function piCredentials(pi: ExtensionAPI) {
 		box.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
 		return box;
 	});
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		ready = start(ctx);
+		if (!(await isBuildNeeded(helperBuild).catch(() => true))) await ready;
 	});
 
 	async function start(ctx: ExtensionContext): Promise<void> {

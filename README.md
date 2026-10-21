@@ -6,7 +6,7 @@ Status: the helper, `/cred list | add | register | edit | grant | revoke | group
 
 ## Install
 
-Requires macOS, Swift 6.4 or newer, and Pi. The package has no install script. After `pi install` or `pi update`, the helper is missing or out of date when Pi starts. The extension then runs `scripts/build.zsh` through [pi-compiled](https://github.com/OwaisQuadri/pi-compiled), which builds and signs it, and shows a progress bar above the editor. It does not ask first. Pi finishes starting when the build is done. It refuses to build unless the checkout is the fetched upstream commit, so install from a branch, not a pinned tag or commit. It also refuses when the helper source has uncommitted or ignored changes, when `.swiftpm` exists, or when the package is not its own Git checkout, and then tells you to run the script yourself. Each build starts from an empty build directory, so no leftover build files are linked in. To use a helper built elsewhere, set `PI_CREDENTIALS_HELPER` to its absolute path; the extension refuses a relative path or a file that is not executable.
+Requires macOS, Swift 6.4 or newer, and Pi. The package has no install script. After `pi install` or `pi update`, the helper is missing or out of date when Pi starts. The extension then runs `scripts/build.zsh` through [pi-compiled](https://github.com/OwaisQuadri/pi-compiled), which builds and signs it, and shows a progress bar above the editor. It does not ask first. Other extensions start while it builds; messages, tool calls, tool output, and `/cred` wait until the build finishes. It refuses to build unless the checkout is the fetched upstream commit, so install from a branch, not a pinned tag or commit. It also refuses when the helper source has uncommitted or ignored changes, when `.swiftpm` exists, or when the package is not its own Git checkout, and then tells you to run the script yourself. Each build starts from an empty build directory, so no leftover build files are linked in. To use a helper built elsewhere, set `PI_CREDENTIALS_HELPER` to its absolute path; the extension refuses a relative path or a file that is not executable.
 
 ```zsh
 pi install git:https://github.com/OwaisQuadri/pi-credentials
@@ -37,7 +37,7 @@ Then register a key that is already in Keychain, define a project group, and gra
 ## Parts
 
 - **Swift helper.** A signed binary that reads registered Keychain items without a dialog, stores the catalog and grants, and asks for owner confirmation.
-- **Pi extension.** TypeScript. It provides the `/cred` command, the agent tools, output redaction, and the read block. It calls the helper and never caches values on disk. At session start, it removes environment variables whose values match a registered `api-key` or `app-password` from the Pi process, so tools that Pi starts do not inherit them.
+- **Pi extension.** TypeScript. It provides the `/cred` command, the agent tools, output redaction, and the read block. It calls the helper and never caches values on disk. At session start, it removes environment variables whose values match a registered `api-key` or `app-password` from the Pi process, so tools that Pi starts do not inherit them. When the helper is already built, this happens before the next extension starts. During a build, other extensions' startup code can run before the variables are removed; tool calls still wait for it.
 
 ## Catalog
 
