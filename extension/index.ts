@@ -7,7 +7,8 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { callHelper, describeLeaks, describeListing, HelperError, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
+import { callHelper, describeLeaks, describeListing, HelperError, helperBuild, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
+import { isBuildNeeded } from "pi-compiled";
 
 const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
@@ -50,6 +51,7 @@ function sessionFile(ctx: ExtensionContext): string | undefined {
 }
 
 let currentRun = "";
+let ready: Promise<void> = Promise.resolve();
 const secretHandles: Map<string, string> = (globalThis as any).__piCredentialsSecretHandles ??= new Map<string, string>();
 
 let leakReport: LeakReport = { leaks: [], unknown: [], scanned: 0 };
@@ -432,6 +434,11 @@ export default function piCredentials(pi: ExtensionAPI) {
 		return box;
 	});
 	pi.on("session_start", async (_event, ctx) => {
+		ready = start(ctx);
+		if (!(await isBuildNeeded(helperBuild).catch(() => true))) await ready;
+	});
+
+	async function start(ctx: ExtensionContext): Promise<void> {
 		try {
 			await prepareHelper(ctx);
 			await refresh(ctx.cwd);
@@ -443,9 +450,10 @@ export default function piCredentials(pi: ExtensionAPI) {
 				if (lines && ctx.hasUI) pi.appendEntry("pi-credentials-leaks", { lines, run: currentRun });
 			}).catch(() => undefined);
 		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
-	});
+	}
 
 	pi.on("input", async (event, ctx) => {
+		await ready;
 		try {
 			const result = await redactPieces([event.text]);
 			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);
@@ -459,6 +467,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event) => {
+		await ready;
 		try {
 			const text = JSON.stringify(event.input);
 			const result = await redactPieces([text]);
@@ -475,6 +484,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		await ready;
 		if (!["read", "edit", "grep"].includes(event.toolName)) return undefined;
 		const input = event.input as { path?: unknown; glob?: unknown };
 		const path = typeof input.path === "string" ? input.path : undefined;
@@ -564,6 +574,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 		description: "Manage credentials that agents can use without seeing them",
 		getArgumentCompletions: (argumentText) => completions(argumentText, cache),
 		handler: async (argumentText, ctx) => {
+			await ready;
 			try {
 				const message = await runCommand(argumentText, ctx, pi);
 				if (message) ctx.ui.notify(message, "info");
@@ -657,6 +668,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event) => {
+		await ready;
 		const withheld = (reason: string) => ({ content: [{ type: "text" as const, text: `pi-credentials withheld this output because ${reason}` }], structuredContent: undefined, details: {}, isError: true });
 		try {
 			const parts = event.content ?? [];
