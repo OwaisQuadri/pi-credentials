@@ -38,7 +38,7 @@ test("the helper builds after install without asking, shows its progress, and re
 	assert.equal(interactive.asked.length, 0);
 	assert.equal(existsSync(join(build.packageRoot, "bin/helper")), true);
 	assert.ok(interactive.widgets.some((lines) => lines?.[0]?.includes("1/2 Compiling helper")));
-	assert.equal(interactive.widgets.at(-1), undefined);
+	assert.deepEqual(interactive.widgets.at(-1), ["pi-credentials helper: built and signed."]);
 
 	rmSync(join(build.packageRoot, "bin/helper"));
 	const headless = context(false);

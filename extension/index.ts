@@ -439,21 +439,24 @@ export default function piCredentials(pi: ExtensionAPI) {
 	});
 
 	async function start(ctx: ExtensionContext): Promise<void> {
+		const note = (text?: string) => { try { if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-notice", text === undefined ? undefined : [`pi-credentials: ${text}`]); } catch {} };
+		note();
 		try {
 			await prepareHelper(ctx);
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
-			if (stripped.length) ctx.ui.notify(`pi-credentials removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`, "info");
+			if (stripped.length) note(`removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`);
 			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => {
 				setLeakReport(report);
 				const lines = describeLeaks(report);
 				if (lines && ctx.hasUI) pi.appendEntry("pi-credentials-leaks", { lines, run: currentRun });
 			}).catch(() => undefined);
-		} catch (error) { ctx.ui.notify(`pi-credentials: ${(error as Error).message}`, "warning"); }
+		} catch (error) { note((error as Error).message); }
 	}
 
 	pi.on("input", async (event, ctx) => {
 		await ready;
+		if (ctx.hasUI) for (const key of ["pi-credentials-build", "pi-credentials-notice"]) ctx.ui.setWidget(key, undefined);
 		try {
 			const result = await redactPieces([event.text]);
 			if (result?.unavailable.length) throw new Error(`could not read ${result.unavailable.join(", ")} from the Keychain. Unlock the Keychain, or delete those credentials`);
@@ -461,7 +464,9 @@ export default function piCredentials(pi: ExtensionAPI) {
 			ctx.ui.notify("pi-credentials replaced a credential in your message before sending it.", "warning");
 			return { action: "transform", text: result.pieces[0], images: event.images };
 		} catch (error) {
-			ctx.ui.notify(`pi-credentials did not send this message because it could not check it for credentials: ${error instanceof Error ? error.message : String(error)}`, "error");
+			const reason = `did not send this message because it could not check it for credentials: ${error instanceof Error ? error.message : String(error)}`;
+			if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-notice", [`pi-credentials: ${reason}`]);
+			else ctx.ui.notify(`pi-credentials ${reason}`, "error");
 			return { action: "handled" };
 		}
 	});

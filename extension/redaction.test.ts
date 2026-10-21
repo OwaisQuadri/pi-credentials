@@ -46,7 +46,7 @@ test("credential variables leave the Pi process and protected files stay unread"
 	process.env.LEAKED_KEY = "xxSECRETxx";
 	process.env.HARMLESS_SETTING = "plain-value";
 	const notes: string[] = [];
-	await handlers.session_start({}, { cwd: directory, ui: { notify: (text: string) => notes.push(text) } });
+	await handlers.session_start({}, { cwd: directory, hasUI: true, ui: { notify: () => undefined, setWidget: (_key: string, lines?: string[]) => { if (lines) notes.push(...lines); } } });
 	assert.equal(process.env.LEAKED_KEY, undefined);
 	assert.equal(process.env.HARMLESS_SETTING, "plain-value");
 	assert.match(notes.join("\n"), /LEAKED_KEY/);
@@ -148,6 +148,12 @@ test("messages and tool call arguments never reach the model with a registered k
 	writeFileSync(join(directory, "locked"), "");
 	assert.deepEqual(await handlers.input({ text: "clean" }, ctx), { action: "handled" });
 	assert.match(notes.at(-1) ?? "", /could not read key/);
+	const widgets: Array<[string, string[] | undefined]> = [];
+	const ui = { cwd: directory, hasUI: true, ui: { notify: () => undefined, setWidget: (key: string, lines?: string[]) => { widgets.push([key, lines]); } } };
+	assert.deepEqual(await handlers.input({ text: "clean" }, ui), { action: "handled" });
+	assert.deepEqual(widgets.slice(0, 2), [["pi-credentials-build", undefined], ["pi-credentials-notice", undefined]]);
+	assert.equal(widgets[2][0], "pi-credentials-notice");
+	assert.match(widgets[2][1]?.[0] ?? "", /could not read key/);
 	assert.equal((await handlers.tool_call({ toolName: "bash", input: { command: "ls" } }, ctx))?.block, true);
 	assert.equal((await handlers.tool_result({ content: [{ type: "text", text: "clean" }] }, ctx)).isError, true);
 	rmSync(join(directory, "locked"));
