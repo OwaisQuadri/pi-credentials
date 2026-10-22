@@ -2,7 +2,7 @@
 
 A Pi extension that lets agents **use** your credentials without **seeing** them. You decide which credential works where, and you can always see why each one exists.
 
-Status: the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, the read block for `.env` and Pi auth files, leak warnings with `/cred scan | rotated | scrub`, last use in `/cred list`, and saving a `{{secret:…}}` handle from `pi-ask-user` work. One-time use of a handle without saving it is not built yet.
+Status: stable projects with `/project create | list | rename | inspect | membership`, the helper, `/cred list | add | register | edit | grant | revoke | group | delete | env`, the `cred env create` command, the agent tools `cred_list`, `cred_request`, `cred_type`, `cred_sudo`, `cred_notarize`, `cred_env`, and `cred_ask`, output redaction, the read block for `.env` and Pi auth files, leak warnings with `/cred scan | rotated | scrub`, last use in `/cred list`, and saving a `{{secret:…}}` handle from `pi-ask-user` work. One-time use of a handle without saving it is not built yet.
 
 ## Install
 
@@ -12,13 +12,16 @@ Requires macOS, Swift 6.4 or newer, and Pi. The package has no install script. A
 pi install git:https://github.com/OwaisQuadri/pi-credentials
 ```
 
-Then register a key that is already in Keychain, define a project group, and grant it:
+Register a key that is already in Keychain. Create a project, approve this repository's membership, and grant the key:
 
 ```text
 /cred register openrouter openrouter-api-key api-key
-/cred group work github.com/<org>/*
-/cred grant openrouter work
+/project create Work tools
+/project membership add <project-id>
+/cred grant openrouter project:<project-id>
 ```
+
+Use the identifier returned by `/project create` in place of `<project-id>`.
 
 ## Purpose
 
@@ -52,7 +55,7 @@ Only credentials that you register appear. Each entry has:
 | allowed hosts | Optional, `api-key` only. Empty means any host. `api.example.com` matches only that host; `*.example.com` matches it and every subdomain. |
 | allowed apps | Optional, for typing. Bundle identifiers, such as `com.apple.ScreenContinuity`. Empty means the broker never types the credential. |
 | rotation link | Optional. The page where you replace this credential. |
-| grants | `global`, or one or more project groups |
+| grants | `global`, `project:<identifier>`, or legacy remote group names |
 | environment variable | Optional. The name in `.env` files. The default is the credential name in upper case, such as `OPENROUTER`. |
 
 Registering a credential moves the item under the helper's ownership:
@@ -73,10 +76,17 @@ The agent reads the catalog with `cred_list`: names, descriptions, kinds, and ac
 
 ## Scope
 
-- `global`: every project.
-- Project group: a name, such as `work`, matched by Git remote pattern, such as `github.com/<org>/*`. Worktrees and copy-on-write checkouts share the remote, so they match automatically.
+- `global`: every repository, including directories outside Git.
+- Project: a stable UUID with a readable name. A credential grant refers to `project:<identifier>`, not the name.
+- Legacy remote group: a name, such as `work`, matched by Git remote patterns, such as `github.com/<org>/*`.
 
-A later version may replace remote patterns with deterministic project tags.
+The helper stores project names and explicit repository membership in its Keychain catalog, outside repository control. Adding membership requires owner authentication because it gives access to the project's granted credentials. A repository can belong to several projects. Renaming a project leaves its identifier, membership, and grants unchanged. Names need not be unique; commands use the full identifier.
+
+Repository identity is the canonical absolute Git common-directory path. Linked worktrees and symlinked paths share membership. A separate clone or copy at another path does not inherit project membership, even with identical remotes. Moving the common directory requires a new membership approval. Membership follows the path, not a cryptographic identity of its contents; replacing a repository at an approved path reuses that membership.
+
+Removing membership stops only access derived from that project. It does not remove the project's credential grants or independent global, legacy-group, or other project access. `/cred revoke <credential> project:<identifier>` removes the credential's project grant instead.
+
+Existing remote groups and their grants keep their behavior. They can independently authorize a clone with a matching remote. No command migrates patterns into projects or assigns membership automatically. Ticket labels, project names, repository files, and remote patterns never create project membership.
 
 ## Agent actions
 
@@ -118,6 +128,24 @@ ln -s <package directory>/scripts/cred.zsh ~/.local/bin/cred
 - `/cred list` opens a scrollable picker: name, kind, description, grants, last use.
 - **Owner confirmation is required for add, register, edit, grant, revoke, group, delete, rotated, and scrub.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
 - `/cred edit` changes the value or the metadata: description, kind, hosts, apps, rotation link, and environment variable. It never shows the value. A new value counts as a rotation.
+- `/cred grant <credential> project:<identifier>` grants a credential to an explicit project through the same owner confirmation as other grants. Tab completion shows project names beside their scopes.
+
+### Projects
+
+```text
+/project create <readable name>
+/project list
+/project rename <identifier> <readable name>
+/project inspect <identifier>
+/project membership add <identifier> [repository directory]
+/project membership remove <identifier> [repository directory or recorded identity]
+```
+
+Names and paths can contain spaces; they use the rest of the command without shell quoting. Membership defaults to the current directory. The helper resolves Git common-directory identity before approval. Removal also accepts the exact recorded identity from `/project inspect`, even when that directory no longer exists.
+
+`list` shows identifiers and marks projects that include this repository. `inspect` shows the name, approved repository identities, and credential grants. Tab completes subcommands, membership operations, identifiers with names, and recorded identities for removal. Creation, rename, and membership changes require owner authentication. The membership prompt names the project, repository identity, and affected credentials. Creating a project gives it no repositories or grants.
+
+The extension caches metadata only for completion. Each credential operation asks the Swift helper to check the current catalog and repository membership.
 
 ## Input
 
@@ -135,14 +163,14 @@ When a credential is not granted for the current project, the refusal gives the 
 'tracker' is not granted for this project. Ask the user to run: /cred grant tracker docs
 ```
 
-When no project group matches the repository, the fix is `/cred grant tracker global, or add a project group for this repository`.
+For an approved project, the fix uses `/cred grant tracker project:<identifier>`. Existing matching remote groups still produce a group grant suggestion. When neither applies, the fix offers a global grant or a remote group. To use explicit membership instead, create a project and approve the repository first.
 
 In an interactive session, the agent offers the grant inline, and you confirm with Touch ID. In an unattended session, the agent records the block and moves to other work.
 
 ## Visibility
 
 - The footer shows a marker, such as `🔑 openrouter`, while a credential is in use.
-- `~/.pi/agent/cred/usage.jsonl` records each use and each refusal: time, credential, action, target, project groups, session ID, and result. Never the value. Keep it out of Git.
+- `~/.pi/agent/cred/usage.jsonl` records each use and each refusal: time, credential, action, target, legacy project groups, stable project identifiers, session ID, and result. Never the value. Keep it out of Git.
 
 ## Leak warnings
 
@@ -188,7 +216,7 @@ The broker scans saved chat history for credentials that leaked before redaction
 - A server that receives a key can log it.
 - `cred_sudo` gives root to each approved command. Root can bypass every layer above.
 - **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. The startup build runs without asking. It refuses uncommitted changes and any commit other than the fetched upstream one, but an agent that can commit to the installed clone and also move its upstream-tracking ref, or put a program named `swift` on your `PATH`, can still get its code built and signed. The build checks come from pi-compiled's latest `main`, so anyone who can push to that repository can also change what gets built. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
-- **Project scope is advisory against an agent that can run the helper.** The helper reads Git remotes from the directory it is given, and an agent can give it any directory. The command guard should block direct helper calls from the shell.
+- **Project scope is advisory against an agent that can run the helper.** The helper resolves membership and legacy remote groups from the directory it receives. An agent can give it another directory. Explicit membership does not fix this cwd spoofing limitation. The command guard should block direct helper calls from the shell.
 - Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes. Other encoders, partial values, and transformed values get through.
 - Redaction checks text only. A credential shown inside an image, in your message or in a tool result, reaches the model.
 - Redaction skips passwords, passcodes, and values under 8 characters. Otherwise anyone who can call `redact` could guess a short value by watching which guess gets redacted. The broker never prints those values and never writes them to `.env` files. They can still reach output through the app that `cred_type` types into, or a command that `cred_sudo` runs.
@@ -232,11 +260,14 @@ Each command reads one JSON object from standard input and writes one JSON objec
 
 | Command | Input | Touch ID |
 |---|---|---|
-| `list` | `cwd` | No; each credential includes `lastUse` |
+| `list` | `cwd` | No; returns credentials with `lastUse`, legacy groups, projects, current `projectIDs`, and optional repository identity |
 | `register` | `name`, `service`, `kind`, `description`, optional `account`, `hosts`, `apps`, `rotation` | Yes |
 | `add` | `name`, `value`, `kind`, `description`, optional `service` and metadata | Yes |
 | `edit` | `name`, and the metadata or `value` to change | Yes |
-| `grant`, `revoke` | `name`, `scope` | Yes |
+| `grant`, `revoke` | `name`, `scope` (`global`, legacy group, or `project:<identifier>`) | Yes |
+| `project-create` | `name` | Yes |
+| `project-rename` | `project` (identifier), `name` | Yes |
+| `project-membership` | `project`, `operation` (`add` or `remove`), `cwd`, optional `path` | Yes |
 | `group` | `name`, `patterns`; empty patterns remove the group | Yes |
 | `delete` | `name`, optional `isValueDeleted` | Yes |
 | `request` | `name`, `cwd`, `session`, `request` | No |
@@ -255,7 +286,7 @@ Each command reads one JSON object from standard input and writes one JSON objec
 
 With `outputFile`, the helper streams the original response bytes to a new file, up to 100 MiB. Relative paths use the project directory; absolute paths are accepted. Parent directories must exist. Existing destinations, symlinks in any path component, and parent traversal (`..`) are refused. On macOS, use `/private/tmp` rather than its `/tmp` symlink. The file has mode `0600` and appears only after a complete successful HTTP response. HTTP errors, interrupted or oversized responses, unavailable credential checks, and responses containing registered credential forms or the active key are refused without publishing a file. The result contains only `status`, redacted `contentType`, `outputFile`, `byteCount`, and redaction metadata, never response bytes. No filename is inferred from server headers.
 
-`cwd` is the project directory. The helper reads its Git remotes to find the project groups.
+`cwd` is the repository directory. The helper resolves its canonical Git common directory for explicit membership and reads its remotes for legacy groups. `list.projects` maps identifiers to records with `name` and `repositories`. `list.projectIDs` contains the projects that include the current repository. `list.repository` is absent outside Git. The three project mutation commands return the affected identifier in `project`.
 
 ## License
 

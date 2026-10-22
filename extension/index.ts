@@ -7,7 +7,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { callHelper, describeLeaks, describeListing, HelperError, helperBuild, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
+import { callHelper, describeLeaks, describeListing, describeScope, HelperError, helperBuild, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
 import { isBuildNeeded } from "pi-compiled";
 
 const subcommands: Record<string, string> = {
@@ -15,7 +15,7 @@ const subcommands: Record<string, string> = {
 	add: "Store a new credential value",
 	register: "Take over an existing Keychain item",
 	edit: "Change a credential's value, description, kind, hosts, apps, rotation link, or environment variable",
-	grant: "Let agents use a credential globally or in a project group",
+	grant: "Let agents use a credential globally, in a project, or in a remote group",
 	revoke: "Remove a grant",
 	group: "Set or remove a project group's Git remote patterns",
 	delete: "Unregister a credential, optionally deleting its Keychain item",
@@ -23,6 +23,14 @@ const subcommands: Record<string, string> = {
 	scan: "Scan all saved sessions for leaked credentials",
 	rotated: "Clear leak warnings: a credential, a key format, a fingerprint, or all",
 	scrub: "Rewrite leaked values in saved sessions to [cred-scrubbed:name] markers",
+};
+
+const projectSubcommands: Record<string, string> = {
+	create: "Create a project with a stable identifier",
+	list: "Show projects and their identifiers",
+	rename: "Change a project's readable name without changing access",
+	inspect: "Show approved repositories and credential grants",
+	membership: "Add or remove an approved repository",
 };
 
 interface EnvResult {
@@ -162,7 +170,7 @@ interface HTTPResponse {
 	unavailable: string[];
 }
 
-let cache: Catalog = { credentials: [], groups: {}, projectGroups: [] };
+let cache: Catalog = { credentials: [], groups: {}, projectGroups: [], projects: {}, projectIDs: [] };
 const active = new Map<string, number>();
 
 function showActive(ctx: ExtensionContext) {
@@ -228,13 +236,25 @@ function isFuzzyMatch(query: string, text: string): boolean {
 	return index === query.length;
 }
 
-function completions(argumentText: string, catalog: Catalog): { value: string; label: string; description?: string }[] | null {
+function completions(argumentText: string, catalog: Catalog, suite: "cred" | "project" = "cred"): { value: string; label: string; description?: string }[] | null {
 	const parts = argumentText.split(/\s+/);
-	const current = (parts.pop() ?? "").toLowerCase();
-	const head = parts.length ? `${parts.join(" ")} ` : "";
+	let current = (parts.pop() ?? "").toLowerCase();
+	let head = parts.length ? `${parts.join(" ")} ` : "";
 	const options: { label: string; description?: string }[] = [];
 	const [subcommand, name] = parts;
-	if (parts.length === 0) {
+	if (suite === "project") {
+		if (parts.length === 0) {
+			for (const [label, description] of Object.entries(projectSubcommands)) options.push({ label, description });
+		} else if (subcommand === "membership" && parts.length === 1) {
+			options.push({ label: "add", description: "Approve a repository and its linked worktrees" }, { label: "remove", description: "Remove only project-derived access" });
+		} else if ((["rename", "inspect"].includes(subcommand) && parts.length === 1) || (subcommand === "membership" && parts.length === 2)) {
+			for (const [label, project] of Object.entries(catalog.projects)) options.push({ label, description: project.name });
+		} else if (subcommand === "membership" && name === "remove" && parts.length >= 3) {
+			current = [...parts.slice(3), current].join(" ").toLowerCase();
+			head = `${parts.slice(0, 3).join(" ")} `;
+			for (const repository of catalog.projects[parts[2]]?.repositories ?? []) options.push({ label: repository });
+		}
+	} else if (parts.length === 0) {
 		for (const [label, description] of Object.entries(subcommands)) options.push({ label, description });
 	} else if (parts.length === 1 && !["list", "env", "scan", "scrub"].includes(subcommand)) {
 		if (subcommand === "rotated") {
@@ -245,13 +265,13 @@ function completions(argumentText: string, catalog: Catalog): { value: string; l
 		} else if (subcommand === "group") {
 			for (const [label, patterns] of Object.entries(catalog.groups)) options.push({ label, description: patterns.join(", ") });
 		} else if (subcommand !== "add" && subcommand !== "register") {
-			for (const listing of catalog.credentials) options.push({ label: listing.name, description: describeListing(listing) });
+			for (const listing of catalog.credentials) options.push({ label: listing.name, description: describeListing(listing, catalog) });
 		}
 	} else if (parts.length === 2 && (subcommand === "grant" || subcommand === "revoke")) {
 		const listing = catalog.credentials.find((item) => item.name === name);
-		const scopes = subcommand === "revoke" ? listing?.grants ?? [] : ["global", ...Object.keys(catalog.groups)];
+		const scopes = subcommand === "revoke" ? listing?.grants ?? [] : ["global", ...Object.keys(catalog.groups), ...Object.keys(catalog.projects).map((id) => `project:${id}`)];
 		for (const scope of scopes) {
-			options.push({ label: scope, description: scope === "global" ? "Every project" : (catalog.groups[scope] ?? []).join(", ") });
+			options.push({ label: scope, description: scope === "global" ? "Every project" : scope.startsWith("project:") ? describeScope(scope, catalog) : (catalog.groups[scope] ?? []).join(", ") });
 		}
 	} else if (parts.length === 2 && subcommand === "add" || parts.length === 3 && subcommand === "register") {
 		for (const kind of kinds) options.push({ label: kind });
@@ -299,11 +319,12 @@ async function runCommand(argumentText: string, ctx: ExtensionContext, pi: Exten
 	switch (subcommand) {
 		case "list": {
 			if (!catalog.credentials.length) return "No credentials are registered. Use /cred add or /cred register.";
-			const lines = catalog.credentials.map((listing) => `${listing.isGranted ? "●" : "○"} ${listing.name} · ${describeListing(listing)}`);
-			const choice = await ctx.ui.select(`Credentials · ● usable in this project${catalog.projectGroups.length ? ` (${catalog.projectGroups.join(", ")})` : ""}`, lines);
+			const lines = catalog.credentials.map((listing) => `${listing.isGranted ? "●" : "○"} ${listing.name} · ${describeListing(listing, catalog)}`);
+			const scopes = [...catalog.projectIDs.map((id) => catalog.projects[id].name), ...catalog.projectGroups];
+			const choice = await ctx.ui.select(`Credentials · ● usable here${scopes.length ? ` (${scopes.join(", ")})` : ""}`, lines);
 			if (!choice) return undefined;
 			const listing = catalog.credentials[lines.indexOf(choice)];
-			return [`${listing.name}: ${listing.description}`, `Kind: ${listing.kind}`, `Last use: ${listing.lastUse ?? "never"}`, `Hosts: ${listing.hosts.join(", ") || "any"}`, `Apps: ${listing.apps.join(", ") || "none (never typed)"}`, `Grants: ${listing.grants.join(", ") || "none"}`, listing.rotation ? `Rotate at: ${listing.rotation}` : ""].filter(Boolean).join("\n");
+			return [`${listing.name}: ${listing.description}`, `Kind: ${listing.kind}`, `Last use: ${listing.lastUse ?? "never"}`, `Hosts: ${listing.hosts.join(", ") || "any"}`, `Apps: ${listing.apps.join(", ") || "none (never typed)"}`, `Grants: ${listing.grants.map((scope) => describeScope(scope, catalog)).join(", ") || "none"}`, listing.rotation ? `Rotate at: ${listing.rotation}` : ""].filter(Boolean).join("\n");
 		}
 		case "add": {
 			requireName();
@@ -363,7 +384,7 @@ async function runCommand(argumentText: string, ctx: ExtensionContext, pi: Exten
 		case "grant":
 		case "revoke": {
 			const scope = rest[0];
-			if (!scope) throw new HelperError("missing-scope", `Usage: /cred ${subcommand} <name> <global|group>`);
+			if (!scope) throw new HelperError("missing-scope", `Usage: /cred ${subcommand} <name> <global|group|project:identifier>`);
 			await callHelper(subcommand, { name: requireName(), scope });
 			return subcommand === "grant" ? `Agents may use ${name} in ${scope}.` : `Revoked ${name} from ${scope}.`;
 		}
@@ -409,15 +430,58 @@ async function runCommand(argumentText: string, ctx: ExtensionContext, pi: Exten
 	}
 }
 
+async function runProjectCommand(argumentText: string, ctx: ExtensionContext): Promise<string> {
+	const [subcommand = "list", rest = ""] = argumentText.trim().split(/\s+(.*)/s, 2).filter(Boolean);
+	const catalog = await refresh(ctx.cwd);
+	const requireArgument = (value: string | undefined, usage: string) => {
+		if (!value) throw new HelperError("missing-argument", `Usage: /project ${usage}`);
+		return value;
+	};
+	switch (subcommand) {
+		case "create": {
+			const name = requireArgument(rest, "create <readable name>");
+			const result = await callHelper<{ project: string }>("project-create", { name });
+			return `Created ${name} (${result.project}). No repositories or credentials are assigned.`;
+		}
+		case "list":
+			return Object.entries(catalog.projects).map(([id, project]) => `${catalog.projectIDs.includes(id) ? "●" : "○"} ${id} · ${project.name} · ${project.repositories.length} repositories`).join("\n") || "No projects exist. Use /project create <readable name>.";
+		case "rename": {
+			const [identifier, nameText] = rest.split(/\s+(.*)/s, 2);
+			const project = requireArgument(identifier, "rename <identifier> <readable name>");
+			const name = requireArgument(nameText, "rename <identifier> <readable name>");
+			await callHelper("project-rename", { project, name });
+			return `Renamed ${project} to ${name}. Membership and grants stay unchanged.`;
+		}
+		case "inspect": {
+			const id = requireArgument(rest, "inspect <identifier>");
+			const project = catalog.projects[id];
+			if (!project) throw new HelperError("unknown-project", `No project has identifier '${id}'. Use /project list.`);
+			const credentials = catalog.credentials.filter((item) => item.grants.includes(`project:${id}`)).map((item) => item.name);
+			return [`${project.name} (${id})`, `Repositories: ${project.repositories.join(", ") || "none"}`, `Credential grants: ${credentials.join(", ") || "none"}`].join("\n");
+		}
+		case "membership": {
+			const [operation, membership = ""] = rest.split(/\s+(.*)/s, 2);
+			if (operation !== "add" && operation !== "remove") throw new HelperError("invalid-operation", "Usage: /project membership <add|remove> <identifier> [repository directory]");
+			const [identifier, path] = membership.split(/\s+(.*)/s, 2);
+			const project = requireArgument(identifier, "membership <add|remove> <identifier> [repository directory]");
+			await callHelper("project-membership", { project, operation, cwd: ctx.cwd, path });
+			return operation === "add" ? `Approved repository membership in ${project}. Linked worktrees share it.` : `Removed repository membership from ${project}. Independent grants stay unchanged.`;
+		}
+		default:
+			throw new HelperError("unknown-subcommand", `Unknown subcommand ${subcommand}. Use ${Object.keys(projectSubcommands).join(", ")}.`);
+	}
+}
+
 async function offerGrant(name: string, ctx: ExtensionContext, usableKinds: Kind[], signal?: AbortSignal): Promise<boolean> {
 	if (!ctx.hasUI) return false;
 	const catalog = await refresh(ctx.cwd);
 	const kind = catalog.credentials.find((item) => item.name === name)?.kind;
 	if (!kind || !usableKinds.includes(kind)) return false;
-	const scopes = [...catalog.projectGroups, "global"];
-	const choice = await ctx.ui.select(`An agent wants to use ${name}. Grant it?`, [...scopes.map((scope) => `Grant to ${scope}`), "Do not grant"], { signal });
-	if (!choice || choice === "Do not grant") return false;
-	await callHelper("grant", { name, scope: choice.slice("Grant to ".length) });
+	const scopes = [...catalog.projectIDs.map((id) => `project:${id}`), ...catalog.projectGroups, "global"];
+	const choices = scopes.map((scope) => `Grant to ${describeScope(scope, catalog)}`);
+	const choice = await ctx.ui.select(`An agent wants to use ${name}. Grant it?`, [...choices, "Do not grant"], { signal });
+	if (!choice || !choices.includes(choice)) return false;
+	await callHelper("grant", { name, scope: scopes[choices.indexOf(choice)] });
 	await refresh(ctx.cwd);
 	return true;
 }
@@ -591,6 +655,21 @@ export default function piCredentials(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("project", {
+		description: "Manage stable projects and approved repository membership",
+		getArgumentCompletions: (argumentText) => completions(argumentText, cache, "project"),
+		handler: async (argumentText, ctx) => {
+			await ready;
+			try {
+				ctx.ui.notify(await runProjectCommand(argumentText, ctx), "info");
+			} catch (error) {
+				ctx.ui.notify((error as Error).message, "error");
+			} finally {
+				await refresh(ctx.cwd).catch(() => undefined);
+			}
+		},
+	});
+
 	pi.registerTool({
 		name: "cred_list",
 		label: "Credentials",
@@ -598,7 +677,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _input, _signal, _update, ctx) {
 			const catalog = await refresh(ctx.cwd);
-			const lines = catalog.credentials.map((listing) => `${listing.isGranted ? "usable" : "not granted"} · ${listing.name} · ${describeListing(listing)}`);
+			const lines = catalog.credentials.map((listing) => `${listing.isGranted ? "usable" : "not granted"} · ${listing.name} · ${describeListing(listing, catalog)}`);
 			const text = lines.length ? lines.join("\n") : "No credentials are registered.";
 			return { content: [{ type: "text", text }], details: catalog };
 		},

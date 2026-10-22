@@ -30,6 +30,8 @@ struct Input: Decodable {
   var path: String?
   var names: [String]?
   var timeoutSeconds: Double?
+  var project: String?
+  var operation: String?
 }
 
 struct Listing: Encodable {
@@ -100,13 +102,14 @@ func lockCatalog() throws {
 }
 
 func logUse(
-  _ input: Input, groups: [String], action: String, target: String, result: String,
+  _ input: Input, groups: [String], projects: [String] = [], action: String, target: String, result: String,
   isRefused: Bool = false
 ) {
   let directory = credDirectory()
   var entry: [String: String] = [
     "time": ISO8601DateFormatter().string(from: Date()), "credential": input.name ?? "",
     "action": action, "target": target, "groups": groups.joined(separator: " "),
+    "projects": projects.joined(separator: " "),
     "session": input.session ?? "", "result": result,
   ]
   if isRefused { entry["refused"] = "true" }
@@ -190,13 +193,18 @@ func summary(_ credential: Credential) -> String {
 }
 
 func run(_ command: String, _ input: Input) async throws {
-  let isMutating = ["register", "add", "edit", "grant", "revoke", "group", "delete", "rotated", "scrub"]
+  let isMutating = [
+    "register", "add", "edit", "grant", "revoke", "group", "delete", "rotated", "scrub",
+    "project-create", "project-rename", "project-membership",
+  ]
     .contains(command)
   if isMutating { try lockCatalog() }
   var catalog = try Keychain.loadCatalog()
   if isMutating, try Keychain.isCatalogStaged() { try Keychain.saveCatalog(catalog) }
   let projectRemotes = remotes(at: input.cwd)
   let projectGroups = catalog.groups(forRemotes: projectRemotes)
+  let repository = input.cwd.flatMap { try? Repository.identity(at: $0) }
+  let projectIDs = catalog.projectIDs(forRepository: repository)
   switch command {
   case "list":
     let uses = lastUses()
@@ -204,15 +212,51 @@ func run(_ command: String, _ input: Input) async throws {
       Listing(
         name: name, description: credential.description, kind: credential.kind,
         hosts: credential.hosts, apps: credential.apps, rotation: credential.rotation,
-        env: credential.env ?? Credential.defaultEnvName(name), grants: credential.grants, isGranted: catalog.isGranted(name, remotes: projectRemotes),
+        env: credential.env ?? Credential.defaultEnvName(name), grants: credential.grants,
+        isGranted: catalog.isGranted(name, remotes: projectRemotes, repository: repository),
         lastUse: uses[name])
     }
     struct Output: Encodable {
       var credentials: [Listing]
       var groups: [String: [String]]
       var projectGroups: [String]
+      var projects: [String: Project]
+      var projectIDs: [String]
+      var repository: String?
     }
-    emit(Output(credentials: listings, groups: catalog.groups, projectGroups: projectGroups))
+    emit(Output(
+      credentials: listings, groups: catalog.groups, projectGroups: projectGroups,
+      projects: catalog.projects, projectIDs: projectIDs, repository: repository))
+
+  case "project-create", "project-rename", "project-membership":
+    let change: ProjectChange
+    switch command {
+    case "project-create":
+      change = .create(name: try required(input.name, "name"))
+    case "project-rename":
+      change = .rename(id: try required(input.project, "project"), name: try required(input.name, "name"))
+    default:
+      let id = try required(input.project, "project")
+      let project = try catalog.project(id)
+      let operation = try required(input.operation, "operation")
+      guard ["add", "remove"].contains(operation) else {
+        throw CredentialError("invalid-operation", "Use 'add' or 'remove' for membership.")
+      }
+      let directory: String
+      if let path = input.path, !path.hasPrefix("/") {
+        directory = try required(input.cwd, "cwd") + "/" + path
+      } else {
+        directory = try input.path ?? required(input.cwd, "cwd")
+      }
+      let identity = operation == "remove" && project.repositories.contains(directory)
+        ? directory : try Repository.identity(at: directory)
+      change = .membership(id: id, repository: identity, isAdded: operation == "add")
+    }
+    let id = try catalog.applyProjectChange(change) { reason in
+      try Keychain.authenticateOwner(reason: reason)
+    }
+    try Keychain.saveCatalog(catalog)
+    emit(["project": id])
 
   case "register", "add":
     let name = try required(input.name, "name")
@@ -324,12 +368,18 @@ func run(_ command: String, _ input: Input) async throws {
     let name = try required(input.name, "name")
     let scope = try required(input.scope, "scope")
     var credential = try catalog.credential(name)
-    guard scope == Catalog.globalScope || catalog.groups[scope] != nil else {
-      throw CredentialError("unknown-scope", "Use 'global' or a defined project group.")
+    let projectID = catalog.projectID(forScope: scope)
+    guard scope == Catalog.globalScope || catalog.groups[scope] != nil || projectID != nil else {
+      throw CredentialError("unknown-scope", "Use 'global', a defined group, or project:<identifier> from /project list.")
     }
-    let target = scope == Catalog.globalScope
-      ? "every project"
-      : "project group '\(scope)' (\(catalog.groups[scope, default: []].joined(separator: ", ")))"
+    let target: String
+    if let projectID, let project = catalog.projects[projectID] {
+      target = "project \(project.name.debugDescription) (\(projectID)); repositories: \(project.repositories.isEmpty ? "none" : project.repositories.joined(separator: ", "))"
+    } else {
+      target = scope == Catalog.globalScope
+        ? "every project"
+        : "project group '\(scope)' (\(catalog.groups[scope, default: []].joined(separator: ", ")))"
+    }
     try Keychain.authenticateOwner(
       reason: command == "grant" ? "let agents use '\(name)' in \(target): \(summary(credential))" : "stop agents using '\(name)' in \(target)")
     credential.grants.removeAll { $0 == scope }
@@ -380,17 +430,17 @@ func run(_ command: String, _ input: Input) async throws {
     let name = try required(input.name, "name")
     let host = (try? required(input.request, "request")).flatMap { URL(string: $0.url)?.host } ?? "?"
     func refuse(_ error: CredentialError) -> CredentialError {
-      logUse(input, groups: projectGroups, action: "request", target: host, result: error.code, isRefused: true)
+      logUse(input, groups: projectGroups, projects: projectIDs, action: "request", target: host, result: error.code, isRefused: true)
       return error
     }
     guard let credential = catalog.credentials[name] else {
       throw refuse(CredentialError("unknown-credential", "No registered credential is named '\(name)'."))
     }
-    guard catalog.isGranted(name, remotes: projectRemotes) else {
+    guard catalog.isGranted(name, remotes: projectRemotes, repository: repository) else {
       throw refuse(
         CredentialError(
           "not-granted",
-          "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes))"))
+          "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes, repository: repository))"))
     }
     guard credential.kind == .apiKey else {
       throw refuse(CredentialError("wrong-kind", "'\(name)' is a \(credential.kind.rawValue), not an api-key."))
@@ -412,12 +462,12 @@ func run(_ command: String, _ input: Input) async throws {
           request, credential: credential, value: value, redactor: redactor,
           unavailable: redaction.unavailable)
       }
-      logUse(input, groups: projectGroups, action: "request", target: host, result: String(response.status))
+      logUse(input, groups: projectGroups, projects: projectIDs, action: "request", target: host, result: String(response.status))
       emit(response)
     } catch let error as CredentialError {
       throw refuse(error)
     } catch {
-      logUse(input, groups: projectGroups, action: "request", target: host, result: "error")
+      logUse(input, groups: projectGroups, projects: projectIDs, action: "request", target: host, result: "error")
       throw error
     }
 
@@ -427,17 +477,17 @@ func run(_ command: String, _ input: Input) async throws {
     let target =
       command == "type" ? (input.app ?? "?") : describeCommand(input.arguments ?? []).prefix(200).description
     func refuse(_ error: CredentialError) -> CredentialError {
-      logUse(input, groups: projectGroups, action: command, target: target, result: error.code, isRefused: true)
+      logUse(input, groups: projectGroups, projects: projectIDs, action: command, target: target, result: error.code, isRefused: true)
       return error
     }
     guard let credential = catalog.credentials[name] else {
       throw refuse(CredentialError("unknown-credential", "No registered credential is named '\(name)'."))
     }
-    guard catalog.isGranted(name, remotes: projectRemotes) else {
+    guard catalog.isGranted(name, remotes: projectRemotes, repository: repository) else {
       throw refuse(
         CredentialError(
           "not-granted",
-          "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes))"))
+          "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes, repository: repository))"))
     }
     guard kinds.contains(credential.kind) else {
       throw refuse(
@@ -468,21 +518,21 @@ func run(_ command: String, _ input: Input) async throws {
         let result = try Cancellation.shared.guarded {
           try notarize(arguments, value: value, cwd: input.cwd, redactor: redactor)
         }
-        logUse(input, groups: projectGroups, action: command, target: target, result: String(result.status))
+        logUse(input, groups: projectGroups, projects: projectIDs, action: command, target: target, result: String(result.status))
         emit(result)
       case "sudo":
         let timeout = min(max(input.timeoutSeconds ?? 600, 1), 3600)
         let result = try Cancellation.shared.guarded {
           try runSudo(resolved, value: value, cwd: input.cwd, timeout: timeout, redactor: redactor)
         }
-        logUse(input, groups: projectGroups, action: command, target: target, result: String(result.status))
+        logUse(input, groups: projectGroups, projects: projectIDs, action: command, target: target, result: String(result.status))
         emit(result)
       default:
         let app = try required(input.app, "app")
         let typed = try typeValue(
           value, name: name, into: app, credential: credential, isActivating: input.isActivating ?? true,
           isReturnPressed: input.isReturnPressed ?? false)
-        logUse(input, groups: projectGroups, action: command, target: typed, result: "typed")
+        logUse(input, groups: projectGroups, projects: projectIDs, action: command, target: typed, result: "typed")
         emit(["typed": typed])
       }
     } catch let error as CredentialError {
@@ -505,7 +555,7 @@ func run(_ command: String, _ input: Input) async throws {
     }
     try requireUncommittable(path)
     let granted = catalog.credentials.keys.sorted().filter {
-      catalog.isGranted($0, remotes: projectRemotes) && envKinds.contains(catalog.credentials[$0]!.kind)
+      catalog.isGranted($0, remotes: projectRemotes, repository: repository) && envKinds.contains(catalog.credentials[$0]!.kind)
     }
     let selected = input.names ?? granted
     for name in selected where !granted.contains(name) {
@@ -515,7 +565,7 @@ func run(_ command: String, _ input: Input) async throws {
       }
       throw CredentialError(
         "not-granted",
-        "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes))")
+        "'\(name)' is not granted for this project. Ask the user to run: \(catalog.grantFix(name, remotes: projectRemotes, repository: repository))")
     }
     var lines: [(name: String, line: String)] = []
     var unavailable: [String] = []
@@ -546,7 +596,7 @@ func run(_ command: String, _ input: Input) async throws {
     for (name, variable) in zip(written, variables) {
       var entry = input
       entry.name = name
-      logUse(entry, groups: projectGroups, action: "env", target: path, result: variable)
+      logUse(entry, groups: projectGroups, projects: projectIDs, action: "env", target: path, result: variable)
     }
     struct Output: Encodable {
       var path: String

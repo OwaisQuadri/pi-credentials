@@ -16,7 +16,22 @@ case "$1" in
   request)
     printf '%s' "$input" > "${directory}/request.json"
     printf '%s' "$input" | /usr/bin/python3 -c 'import json,sys; r=json.load(sys.stdin)["request"]; p=r.get("outputFile"); print(json.dumps({"error":{"code":"output-file-refused","message":"Existing paths are refused."}} if p=="existing" else {"status":200,"body":"NEVER_RETURN","isTruncated":False,"redacted":[],"unavailable":[]} if p=="legacy" else {"status":200,"contentType":"application/octet-stream","outputFile":p,"byteCount":1000001,"body":"NEVER_RETURN","isTruncated":False,"redacted":[],"unavailable":[]} if p else {"status":200,"body":"text response","isTruncated":False,"redacted":[],"unavailable":[]}))' ;;
-  list) echo '{"credentials":[{"name":"key","description":"","kind":"api-key","hosts":[],"apps":[],"grants":[],"isGranted":false}],"groups":{},"projectGroups":[]}' ;;
+  list)
+    if [ -f "${directory}/catalog.json" ]; then cat "${directory}/catalog.json";
+    else echo '{"credentials":[{"name":"key","description":"","kind":"api-key","hosts":[],"apps":[],"grants":[],"isGranted":false}],"groups":{},"projectGroups":[],"projects":{},"projectIDs":[]}'; fi ;;
+  project-create|project-rename|project-membership)
+    printf '%s' "$input" > "${directory}/$1.json"
+    if [ -f "${directory}/denied" ]; then echo '{"error":{"code":"auth-denied","message":"Owner approval denied."}}'; exit 1; fi
+    if [ "$1" = project-rename ]; then
+      printf '%s' "$input" | /usr/bin/python3 -c 'import json,sys; i=json.load(sys.stdin); p="${directory}/catalog.json"; c=json.load(open(p)); c["projects"][i["project"]]["name"]=i["name"]; json.dump(c,open(p,"w"))'
+    fi
+    echo '{"project":"11111111-1111-4111-8111-111111111111"}' ;;
+  grant|revoke)
+    printf '%s' "$input" > "${directory}/$1.json"
+    echo '{"changed":true}' ;;
+  env)
+    printf '%s' "$input" > "${directory}/env.json"
+    echo '{"error":{"code":"not-granted","message":"The helper refused access."}}' ;;
   redact)
     [ -e "${directory}/broken" ] && exit 1
     printf '%s' "$input" | /usr/bin/python3 -c 'import json,os,sys; t=json.load(sys.stdin)["text"]; r=t.replace("SECRET","[cred:key]"); print(json.dumps({"text":r,"redacted":["key"] if r!=t else [],"unavailable":["key"] if os.path.exists("${directory}/locked") else []}))' ;;
@@ -29,13 +44,17 @@ type Handler = (event: unknown, ctx: unknown) => Promise<any>;
 const handlers: Record<string, Handler> = {};
 const events: Record<string, (payload: unknown) => void> = {};
 const tools: Record<string, { execute: (...args: any[]) => Promise<any> }> = {};
+const commands: Record<string, {
+	handler: (text: string, ctx: any) => Promise<void>;
+	getArgumentCompletions: (text: string) => { value: string; label: string; description?: string }[] | null;
+}> = {};
 const { default: extension } = await import("./index.ts");
 extension({
 	on: (name: string, handler: Handler) => {
 		const previous = handlers[name];
 		handlers[name] = previous ? async (event, ctx) => (await previous(event, ctx)) ?? handler(event, ctx) : handler;
 	},
-	registerCommand: () => undefined,
+	registerCommand: (name: string, command: typeof commands[string]) => { commands[name] = command; },
 	events: { on: (channel: string, handler: (payload: unknown) => void) => { events[channel] = handler; }, emit: () => undefined },
 	registerEntryRenderer: () => undefined,
 	appendEntry: () => undefined,
@@ -89,6 +108,56 @@ test("credential variables leave the Pi process and protected files stay unread"
 		assert.equal(await handlers.tool_call({ toolName: "read", input: { path } }, ctx), undefined, path);
 	}
 	delete process.env.PI_CODING_AGENT_DIR;
+});
+
+test("project commands refresh names and forward membership and grants to the helper", async () => {
+	const id = "11111111-1111-4111-8111-111111111111";
+	const scope = `project:${id}`;
+	const repository = "/fixture/repository with spaces/.git";
+	const fixture = {
+		credentials: [{ name: "key", description: "Fixture key", kind: "api-key", hosts: [], apps: [], grants: [scope], isGranted: true }],
+		groups: { work: ["example.test/org/*"] }, projectGroups: [],
+		projects: { [id]: { name: "Example project", repositories: [repository] } }, projectIDs: [id], repository,
+	};
+	writeFileSync(join(directory, "catalog.json"), JSON.stringify(fixture));
+	const notes: string[] = [];
+	const ctx = { cwd: directory, sessionManager: { getSessionId: () => "fixture" }, ui: { notify: (text: string) => notes.push(text) } };
+	const run = (text: string) => commands.project.handler(text, ctx);
+	try {
+		await run("");
+		assert.match(notes.pop() ?? "", /Example project/);
+		assert.deepEqual(commands.project.getArgumentCompletions("")?.map((item) => item.label), ["create", "list", "rename", "inspect", "membership"]);
+		assert.deepEqual(commands.project.getArgumentCompletions("membership ")?.map((item) => item.label), ["add", "remove"]);
+		for (const prefix of ["rename ", "inspect ", "membership add ", "membership remove "]) {
+			assert.deepEqual(commands.project.getArgumentCompletions(prefix), [{ value: `${prefix}${id} `, label: id, description: "Example project" }]);
+		}
+		assert.equal(commands.project.getArgumentCompletions(`membership remove ${id} /fixture/repository with `)?.[0].value, `membership remove ${id} ${repository} `);
+		await run("create New  readable name");
+		assert.deepEqual(JSON.parse(readFileSync(join(directory, "project-create.json"), "utf8")), { name: "New  readable name" });
+		await run(`rename ${id} Renamed project`);
+		assert.deepEqual(JSON.parse(readFileSync(join(directory, "project-rename.json"), "utf8")), { project: id, name: "Renamed project" });
+		assert.equal(commands.project.getArgumentCompletions("inspect ")?.[0].description, "Renamed project");
+		await run(`inspect ${id}`);
+		assert.match(notes.pop() ?? "", /Renamed project.*\nRepositories: .*\nCredential grants: key/);
+		await run(`membership add ${id} /fixture/repository  with spaces`);
+		assert.deepEqual(JSON.parse(readFileSync(join(directory, "project-membership.json"), "utf8")), { project: id, operation: "add", cwd: directory, path: "/fixture/repository  with spaces" });
+		await run(`membership remove ${id}`);
+		assert.deepEqual(JSON.parse(readFileSync(join(directory, "project-membership.json"), "utf8")), { project: id, operation: "remove", cwd: directory });
+		assert.match(commands.cred.getArgumentCompletions("grant key project:")?.[0].description ?? "", /Renamed project/);
+		assert.equal(commands.cred.getArgumentCompletions("revoke key ")?.[0].label, scope);
+		for (const command of ["grant", "revoke"]) {
+			await commands.cred.handler(`${command} key ${scope}`, ctx);
+			assert.deepEqual(JSON.parse(readFileSync(join(directory, `${command}.json`), "utf8")), { name: "key", scope });
+		}
+		writeFileSync(join(directory, "denied"), "");
+		await run(`membership add ${id}`);
+		assert.equal(notes.pop(), "Owner approval denied.");
+		await assert.rejects(tools.cred_env.execute("fixture", {}, undefined, undefined, ctx), /helper refused access/);
+		assert.deepEqual(JSON.parse(readFileSync(join(directory, "env.json"), "utf8")), { cwd: directory, session: "fixture" });
+	} finally {
+		rmSync(join(directory, "catalog.json"));
+		rmSync(join(directory, "denied"), { force: true });
+	}
 });
 
 test("cred_request forwards outputFile and returns only file metadata", async () => {
