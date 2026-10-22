@@ -212,6 +212,23 @@ async function redactPieces(pieces: string[]): Promise<{ pieces: string[]; unava
 	return { pieces: redacted, unavailable: result.unavailable };
 }
 
+const remoteUncertainty = "Remote completion was not confirmed. Remote privileged work may still be running.";
+
+function describeRemoteProcess(value: unknown): { text: string; status?: number; isError: boolean } {
+	if (!value || typeof value !== "object") return { text: remoteUncertainty, isError: true };
+	const result = value as ProcessResult;
+	if (!Number.isSafeInteger(result.status) || typeof result.stdout !== "string" || typeof result.stderr !== "string"
+		|| typeof result.isTruncated !== "boolean" || typeof result.isTimedOut !== "boolean") {
+		return { text: remoteUncertainty, isError: true };
+	}
+	const isUncertain = result.isTimedOut || result.status === -1 || result.status === 255;
+	return {
+		text: [`Exit status ${result.status}`, isUncertain ? remoteUncertainty : "", result.isTruncated ? "Output truncated at 1 MB." : "",
+			result.stdout && `stdout:\n${result.stdout}`, result.stderr && `stderr:\n${result.stderr}`].filter(Boolean).join("\n"),
+		status: result.status, isError: isUncertain || result.status !== 0,
+	};
+}
+
 async function stripCredentialVariables(): Promise<string[]> {
 	const names = Object.keys(process.env).filter((name) => (process.env[name]?.length ?? 0) >= 8);
 	if (!names.length) return [];
@@ -600,13 +617,31 @@ export default function piCredentials(pi: ExtensionAPI) {
 		description: "Run one command as root with a registered password. The user approves the exact command with Touch ID each time. Needs a user present.",
 		parameters: Type.Object({
 			name: Type.String({ description: "Registered password credential, such as the Mac login password." }),
-			command: Type.Array(Type.String(), { description: "Program and arguments, without sudo. Not run through a shell.", minItems: 1 }),
+			command: Type.Array(Type.String(), { description: "Program and arguments, without sudo. Use an absolute program path for remote execution. The helper quotes remote arguments.", minItems: 1 }),
+			sshTarget: Type.Optional(Type.String({ description: "Trusted SSH alias or user@host. Remote execution requires /bin/zsh and an absolute program path. Remote cwd is /." })),
 			timeoutSeconds: Type.Optional(Type.Number({ description: "Default 600, at most 3600." })),
 		}, { additionalProperties: false }),
 		async execute(_id, input, signal, _update, ctx) {
 			if (!ctx.hasUI) throw new Error("No user is present to approve a root command. Record the need and continue with other work.");
-			const result = await useCredential(input.name, ctx, ["password"], signal, () => callHelper<ProcessResult>("sudo", { ...base(ctx), name: input.name, arguments: input.command, timeoutSeconds: input.timeoutSeconds }, signal));
-			return { content: [{ type: "text", text: describeProcess(result) }], details: { status: result.status }, isError: result.status !== 0 };
+			const isRemote = Object.hasOwn(input, "sshTarget");
+			try {
+				const result = await useCredential(input.name, ctx, ["password"], signal, () => callHelper<ProcessResult>(isRemote ? "ssh-sudo" : "sudo", {
+					...base(ctx), name: input.name, arguments: input.command, timeoutSeconds: input.timeoutSeconds,
+					...(isRemote ? { sshTarget: input.sshTarget } : {}),
+				}, signal));
+				if (isRemote) {
+					const remote = describeRemoteProcess(signal?.aborted ? undefined : result);
+					return { content: [{ type: "text", text: remote.text }], details: { status: remote.status }, isError: remote.isError };
+				}
+				return { content: [{ type: "text", text: describeProcess(result) }], details: { status: result.status }, isError: result.status !== 0 };
+			} catch (error) {
+				if (!isRemote) throw error;
+				if (error instanceof HelperError) {
+					if (error.code === "unknown-command") throw new HelperError(error.code, "Rebuild the pi-credentials helper to use remote sudo (scripts/build.zsh). No local command was attempted.");
+					if (!["aborted", "timeout", "cancelled", "ssh-sudo-interrupted", "ssh-sudo-failed", "helper-output", "helper-unavailable"].includes(error.code)) throw error;
+				}
+				return { content: [{ type: "text", text: remoteUncertainty }], details: {}, isError: true };
+			}
 		},
 	});
 
