@@ -74,10 +74,23 @@ export function describeLeaks(report: LeakReport): string[] | undefined {
 	];
 }
 
+export interface Project {
+	name: string;
+	repositories: string[];
+}
+
 export interface Catalog {
 	credentials: Listing[];
 	groups: Record<string, string[]>;
 	projectGroups: string[];
+	projects: Record<string, Project>;
+	projectIDs: string[];
+	repository?: string;
+}
+
+export function describeScope(scope: string, catalog: Catalog): string {
+	const project = scope.startsWith("project:") ? catalog.projects[scope.slice("project:".length)] : undefined;
+	return project ? `${project.name} (${scope})` : scope;
 }
 
 export class HelperError extends Error {
@@ -114,9 +127,9 @@ export function callHelper<T>(command: string, input: Record<string, unknown>, s
 	});
 }
 
-export function describeListing(listing: Listing): string {
+export function describeListing(listing: Listing, catalog?: Catalog): string {
 	const hosts = listing.kind === "api-key" ? ` · ${listing.hosts.length ? listing.hosts.join(", ") : "any host"}` : "";
-	const scope = listing.grants.length ? listing.grants.join(", ") : "not granted";
+	const scope = listing.grants.length ? listing.grants.map((grant) => catalog ? describeScope(grant, catalog) : grant).join(", ") : "not granted";
 	const used = listing.lastUse ? ` · used ${new Date(listing.lastUse).toLocaleDateString("en-CA")}` : "";
 	return `${listing.kind}${hosts} · ${scope}${used} · ${listing.description}`;
 }

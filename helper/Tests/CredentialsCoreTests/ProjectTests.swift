@@ -42,11 +42,19 @@ import Testing
   _ = try catalog.applyProjectChange(.rename(id: id, name: "Renamed project")) { _ in }
   #expect(catalog.projects[id]?.name == "Renamed project")
   #expect(catalog.isGranted("key", remotes: [], repository: repository))
+  #expect(
+    catalog.grantFix("key", remotes: [], repository: repository) == "/cred grant key project:\(id)")
+  #expect(catalog.projectID(forScope: Catalog.projectScope(id)) == id)
+  #expect(catalog.projectID(forScope: "project:missing") == nil)
   #expect(!catalog.isGranted("key", remotes: ["Renamed project"]))
+  let restored = try JSONDecoder().decode(Catalog.self, from: JSONEncoder().encode(catalog))
+  #expect(restored.isGranted("key", remotes: [], repository: repository))
   let other = try catalog.applyProjectChange(.create(name: "Other")) { _ in }
   _ = try catalog.applyProjectChange(.membership(id: other, repository: repository, isAdded: true))
   { _ in }
   catalog.credentials["key"]!.grants.append(Catalog.projectScope(other))
+  catalog.credentials["global"]!.grants.append(Catalog.projectScope(id))
+  catalog.credentials["group"]!.grants.append(Catalog.projectScope(id))
   let grants = catalog.credentials
   _ = try catalog.applyProjectChange(.membership(id: id, repository: repository, isAdded: false)) {
     _ in
