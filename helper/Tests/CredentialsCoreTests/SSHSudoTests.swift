@@ -59,7 +59,8 @@ import Testing
     #!/bin/zsh -f
     printf '%s\\n' "$PPID" >> "$PARENTS"
     case "$1 $2" in
-      '-n -k') [ "$MODE" != invalidation ] ;;
+      '-k ') [ "$MODE" != invalidation ] ;;
+      '-n -k') exit 1 ;;
       '-S -v')
         [ "$MODE" != refusal ] || exit 1
         if [ "$MODE" = consuming ]; then cat >/dev/null; fi ;;

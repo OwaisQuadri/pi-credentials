@@ -31,11 +31,11 @@ public struct SSHSudoCommand: Sendable {
     ]
     let script = """
       cd / </dev/null || exit 1
-      trap 'exitStatus=$?; trap - 0; /usr/bin/sudo -n -k </dev/null; exit "$exitStatus"' 0
+      trap 'exitStatus=$?; trap - 0; /usr/bin/sudo -k </dev/null; exit "$exitStatus"' 0
       trap 'exit 129' HUP
       trap 'exit 130' INT
       trap 'exit 143' TERM
-      /usr/bin/sudo -n -k </dev/null || exit 1
+      /usr/bin/sudo -k </dev/null || exit 1
       /usr/bin/sudo -S -v -p '' || exit 1
       /usr/bin/sudo -n -- \(arguments.map(Self.quote).joined(separator: " ")) </dev/null
       exitStatus=$?
