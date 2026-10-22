@@ -56,10 +56,27 @@ public struct Catalog: Codable, Equatable, Sendable {
   public var credentials: [String: Credential] = [:]
   public var groups: [String: [String]] = [:]
   public var dismissed: [String: Double]?
+  public var projects: [String: Project] = [:]
 
-  public init(credentials: [String: Credential] = [:], groups: [String: [String]] = [:]) {
+  public init(
+    credentials: [String: Credential] = [:], groups: [String: [String]] = [:],
+    projects: [String: Project] = [:]
+  ) {
     self.credentials = credentials
     self.groups = groups
+    self.projects = projects
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case credentials, groups, dismissed, projects
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    credentials = try values.decode([String: Credential].self, forKey: .credentials)
+    groups = try values.decode([String: [String]].self, forKey: .groups)
+    dismissed = try values.decodeIfPresent([String: Double].self, forKey: .dismissed)
+    projects = try values.decodeIfPresent([String: Project].self, forKey: .projects) ?? [:]
   }
 
   public static func validateName(_ name: String) throws {
@@ -129,14 +146,17 @@ public struct Catalog: Codable, Equatable, Sendable {
     }
   }
 
-  public func isGranted(_ name: String, remotes: [String]) -> Bool {
+  public func isGranted(_ name: String, remotes: [String], repository: String? = nil) -> Bool {
     guard let credential = credentials[name] else { return false }
     if credential.grants.contains(Self.globalScope) { return true }
-    let projectGroups = Set(groups(forRemotes: remotes))
-    return credential.grants.contains { projectGroups.contains($0) }
+    let scopes = Set(groups(forRemotes: remotes) + projectIDs(forRepository: repository).map(Self.projectScope))
+    return credential.grants.contains { scopes.contains($0) }
   }
 
-  public func grantFix(_ name: String, remotes: [String]) -> String {
+  public func grantFix(_ name: String, remotes: [String], repository: String? = nil) -> String {
+    if let project = projectIDs(forRepository: repository).first {
+      return "/cred grant \(name) \(Self.projectScope(project))"
+    }
     if let group = groups(forRemotes: remotes).first {
       return "/cred grant \(name) \(group)"
     }
