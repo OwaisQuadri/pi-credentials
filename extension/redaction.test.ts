@@ -72,7 +72,7 @@ extension({
 test("piCredentials session_shutdown revokes redaction discovery and restart requires successful startup", async () => {
 	const ctx = { cwd: directory, hasUI: false, sessionManager: { getSessionDir: () => undefined }, ui: { notify: () => undefined } };
 	const request = { version: 1 as const, requestID: "runtime-fixture", pieces: ["clean"] };
-	const check = (service: CredentialRedactionServiceV1) => service.redact(request, { signal: new AbortController().signal });
+	const check = (service: CredentialRedactionServiceV1, pieces = request.pieces) => service.redact({ ...request, pieces }, { signal: new AbortController().signal });
 	const discover = () => {
 		const services: CredentialRedactionServiceV1[] = [];
 		events[credentialRedactionDiscoveryEvent]?.({ version: 1, signal: new AbortController().signal, provide: (service: CredentialRedactionServiceV1) => services.push(service) });
@@ -83,12 +83,15 @@ test("piCredentials session_shutdown revokes redaction discovery and restart req
 	assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "not-ready" });
 	await handlers.session_start({}, ctx);
 	assert.equal((await check(initial)).status, "checked");
+	assert.deepEqual(await check(initial, []), { status: "checked", requestID: request.requestID, policy: "pi-credentials/redact-v1", pieces: [] });
 	writeFileSync(join(directory, "locked"), "");
 	assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "unavailable" });
+	assert.deepEqual(await check(initial, []), { status: "blocked", requestID: request.requestID, code: "unavailable" });
 	rmSync(join(directory, "locked"));
 	for (const output of [{ text: "unexpected", redacted: [], unavailable: [] }, { text: "\uD800", redacted: [], unavailable: [] }, { text: "clean", redacted: [], unavailable: "invalid" }]) {
 		writeFileSync(join(directory, "redaction-response"), JSON.stringify(output));
 		assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "failed" });
+		assert.deepEqual(await check(initial, []), { status: "blocked", requestID: request.requestID, code: "failed" });
 	}
 	rmSync(join(directory, "redaction-response"));
 	await handlers.session_shutdown({}, ctx);

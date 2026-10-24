@@ -211,7 +211,7 @@ async function redactPieces(pieces: string[], signal = AbortSignal.timeout(10_00
 	const isStringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
 	if (!result || typeof result.text !== "string" || /[\uD800-\uDFFF]/u.test(result.text) || !isStringArray(result.redacted) || !isStringArray(result.unavailable)
 		|| (result.unknown !== undefined && !isStringArray(result.unknown))) throw new Error("invalid redaction result.");
-	const redacted = result.text.split(separator);
+	const redacted = pieces.length === 0 && result.text === "" ? [] : result.text.split(separator);
 	if (redacted.length !== pieces.length) throw new Error("redaction changed its structure.");
 	if (!result.redacted.length && !result.unknown?.length && !result.unavailable.length) {
 		if (result.text !== text) throw new Error("invalid redaction result.");
