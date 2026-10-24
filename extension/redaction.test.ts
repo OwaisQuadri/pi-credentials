@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { credentialRedactionDiscoveryEvent, type CredentialRedactionServiceV1 } from "./redaction-service.ts";
 
 const directory = mkdtempSync(join(tmpdir(), "pi-credentials-test-"));
 after(() => rmSync(directory, { recursive: true, force: true }));
@@ -38,11 +39,14 @@ case "$1" in
     echo '{"error":{"code":"not-granted","message":"The helper refused access."}}' ;;
   redact)
     [ -e "${directory}/broken" ] && exit 1
+    if [ -e "${directory}/redaction-response" ]; then cat "${directory}/redaction-response"; exit 0; fi
     printf '%s' "$input" | /usr/bin/python3 -c 'import json,os,sys; t=json.load(sys.stdin)["text"]; r=t.replace("SECRET","[cred:key]"); print(json.dumps({"text":r,"redacted":["key"] if r!=t else [],"unavailable":["key"] if os.path.exists("${directory}/locked") else []}))' ;;
 esac
 `);
 chmodSync(fake, 0o755);
-process.env.PI_CREDENTIALS_HELPER = fake;
+const originalEnvironment = process.env;
+process.env = { HOME: directory, TMPDIR: directory, PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", PI_CREDENTIALS_HELPER: fake };
+after(() => { process.env = originalEnvironment; });
 
 type Handler = (event: unknown, ctx: unknown) => Promise<any>;
 const handlers: Record<string, Handler> = {};
@@ -59,11 +63,48 @@ extension({
 		handlers[name] = previous ? async (event, ctx) => (await previous(event, ctx)) ?? handler(event, ctx) : handler;
 	},
 	registerCommand: (name: string, command: typeof commands[string]) => { commands[name] = command; },
-	events: { on: (channel: string, handler: (payload: unknown) => void) => { events[channel] = handler; }, emit: () => undefined },
+	events: { on: (channel: string, handler: (payload: unknown) => void) => { events[channel] = handler; return () => { delete events[channel]; }; }, emit: () => undefined },
 	registerEntryRenderer: () => undefined,
 	appendEntry: () => undefined,
 	registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { tools[tool.name] = tool; },
 } as never);
+
+test("piCredentials session_shutdown revokes redaction discovery and restart requires successful startup", async () => {
+	const ctx = { cwd: directory, hasUI: false, sessionManager: { getSessionDir: () => undefined }, ui: { notify: () => undefined } };
+	const request = { version: 1 as const, requestID: "runtime-fixture", pieces: ["clean"] };
+	const check = (service: CredentialRedactionServiceV1) => service.redact(request, { signal: new AbortController().signal });
+	const discover = () => {
+		const services: CredentialRedactionServiceV1[] = [];
+		events[credentialRedactionDiscoveryEvent]?.({ version: 1, signal: new AbortController().signal, provide: (service: CredentialRedactionServiceV1) => services.push(service) });
+		assert.equal(services.length, 1);
+		return services[0];
+	};
+	const initial = discover();
+	assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "not-ready" });
+	await handlers.session_start({}, ctx);
+	assert.equal((await check(initial)).status, "checked");
+	writeFileSync(join(directory, "locked"), "");
+	assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "unavailable" });
+	rmSync(join(directory, "locked"));
+	for (const output of [{ text: "unexpected", redacted: [], unavailable: [] }, { text: "\uD800", redacted: [], unavailable: [] }, { text: "clean", redacted: [], unavailable: "invalid" }]) {
+		writeFileSync(join(directory, "redaction-response"), JSON.stringify(output));
+		assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "failed" });
+	}
+	rmSync(join(directory, "redaction-response"));
+	await handlers.session_shutdown({}, ctx);
+	assert.equal(events[credentialRedactionDiscoveryEvent], undefined);
+	assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "not-ready" });
+	writeFileSync(join(directory, "broken"), "");
+	await handlers.session_start({}, ctx);
+	const restarted = discover();
+	assert.notEqual(restarted, initial);
+	assert.deepEqual(await check(restarted), { status: "blocked", requestID: request.requestID, code: "not-ready" });
+	rmSync(join(directory, "broken"));
+	await handlers.session_start({}, ctx);
+	assert.equal((await check(restarted)).status, "checked");
+	assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "not-ready" });
+	await handlers.session_shutdown({}, ctx);
+});
 
 test("credential variables leave the Pi process and protected files stay unread", async () => {
 	process.env.LEAKED_KEY = "xxSECRETxx";
