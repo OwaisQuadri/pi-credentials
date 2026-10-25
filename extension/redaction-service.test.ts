@@ -36,6 +36,89 @@ test("createCredentialRedactionProvider preserves synthetic known and unknown re
 	assert.deepEqual(result, { status: "checked", requestID: "fixture-1", policy: "pi-credentials/redact-v1", pieces: ["before [cred:fixture] after", "[cred:unknown-fixture] and [cred:fixture]"] });
 });
 
+test("createCredentialRedactionProvider withholds native Markdown escaped underscore and hyphen secrets without changing clean bytes", async () => {
+	const calls: string[][] = [];
+	const gate = provider(async (pieces) => {
+		calls.push(pieces);
+		return { pieces: pieces.map((piece) => piece.replaceAll("REGISTERED_CLAIM_SECRET", "[cred:fixture]").replaceAll("REGISTERED-CLAIM-SECRET", "[cred:fixture]")), unavailable: [] };
+	});
+	const pieces = [String.raw`old REGISTERED\_CLAIM\_SECRET [source: synthetic]`, String.raw`old REGISTERED\-CLAIM\-SECRET`, String.raw`clean\_text and clean\-text`, "plain text", "raw REGISTERED_CLAIM_SECRET"];
+	assert.deepEqual(await gate.service.redact(request(pieces), options()), {
+		status: "checked", requestID: "fixture-1", policy: "pi-credentials/redact-v1",
+		pieces: ["[cred:redacted]", "[cred:redacted]", pieces[2], pieces[3], "raw [cred:fixture]"],
+	});
+	assert.deepEqual(calls, [pieces, ["old REGISTERED_CLAIM_SECRET [source: synthetic]", "old REGISTERED-CLAIM-SECRET", "clean_text and clean-text"]]);
+});
+
+test("createCredentialRedactionProvider decodes native entities before backslashes exactly once and preserves literal punctuation", async () => {
+	const calls: string[][] = [];
+	const gate = provider(async (pieces) => {
+		calls.push(pieces);
+		return { pieces: pieces.map((piece) => piece.replaceAll("&#32;ENTITY_KEY", "[cred:fixture]").replaceAll(String.raw`PATH\_SECRET`, "[cred:fixture]")), unavailable: [] };
+	});
+	const punctuation = "\\\\\\`\\*\\_\\{\\}\\[\\]\\<\\>\\#\\+\\-\\!\\|\\~\\&\\=";
+	const pieces = [String.raw`\&#32;ENTITY\_KEY`, "&#32;ENTITY\\_KEY", String.raw`PATH\\\_SECRET`, punctuation, "&#32;&#32;clean\\_text\n123\\. list\n9\\) list\n1234567890\\. literal"];
+	assert.deepEqual(await gate.service.redact(request(pieces), options()), {
+		status: "checked", requestID: "fixture-1", policy: "pi-credentials/redact-v1", pieces: ["[cred:redacted]", pieces[1], "[cred:redacted]", pieces[3], pieces[4]],
+	});
+	assert.deepEqual(calls[1], ["&#32;ENTITY_KEY", " ENTITY_KEY", String.raw`PATH\_SECRET`, "\\`*_{}[]<>#+-!|~&=", "  clean_text\n123. list\n9) list\n1234567890\\. literal"]);
+});
+
+test("createCredentialRedactionProvider blocks unavailable and invalid decoded checks instead of accepting checked originals", async () => {
+	for (const [output, code] of [
+		[{ pieces: ["clean"], unavailable: ["FIXTURE_RAW_SENTINEL"] }, "unavailable"],
+		[null, "invalid-output"], [{ pieces: [], unavailable: [] }, "invalid-output"],
+		[{ pieces: ["clean", "extra"], unavailable: [] }, "invalid-output"],
+		[{ pieces: ["\uD800"], unavailable: [] }, "invalid-output"],
+	] as const) {
+		let calls = 0;
+		const gate = provider(async () => { calls += 1; return calls === 1 ? undefined : output; });
+		assert.deepEqual(await gate.service.redact(request([String.raw`escaped\_text`]), options()), blocked(code));
+		assert.equal(calls, 2);
+	}
+});
+
+test("createCredentialRedactionProvider aborts decoded checks on cancellation and unload without accepting late success", async () => {
+	for (const interruption of ["cancel", "unload"] as const) {
+		const completion = deferred<unknown>();
+		const started = deferred<AbortSignal>();
+		let calls = 0;
+		const gate = provider(async (_pieces, signal) => {
+			calls += 1;
+			if (calls === 1) return undefined;
+			started.resolve(signal);
+			return completion.promise;
+		});
+		const caller = new AbortController();
+		const pending = gate.service.redact(request([String.raw`escaped\_text`]), { signal: caller.signal });
+		const signal = await started.promise;
+		if (interruption === "cancel") caller.abort();
+		else gate.dispose();
+		const result = await pending;
+		assert.deepEqual(result, blocked(interruption === "cancel" ? "cancelled" : "not-ready"));
+		assert.equal(signal.aborted, true);
+		completion.resolve(undefined);
+		await Promise.resolve();
+		assert.deepEqual(await pending, result);
+	}
+});
+
+test("createCredentialRedactionProvider shares the original deadline and per-call input bounds with decoded checks", async (t) => {
+	let now = 0;
+	t.mock.method(performance, "now", () => now);
+	let calls = 0;
+	const gate = provider(async (pieces) => {
+		calls += 1;
+		assert.ok(pieces.length <= 1_000);
+		assert.ok(pieces.every((piece) => Buffer.byteLength(piece) <= 1_048_576));
+		assert.ok(pieces.reduce((total, piece) => total + Buffer.byteLength(piece), 0) <= 4_194_304);
+		now = calls === 1 ? 6_000 : 10_001;
+		return undefined;
+	});
+	assert.deepEqual(await gate.service.redact(request(new Array(4).fill(String.raw`\_`.repeat(524_288))), options()), blocked("timeout"));
+	assert.equal(calls, 2);
+});
+
 test("createCredentialRedactionProvider refuses malformed requests and UTF8 input limits before redaction", async () => {
 	let calls = 0;
 	const gate = provider(async () => { calls += 1; });

@@ -40,6 +40,12 @@ function isPieces(value: unknown, totalLimit: number, pieceLimit = totalLimit): 
 	return true;
 }
 
+function decodeNativeMarkdown(piece: string): string {
+	return piece.replace(/^(?:&#32;)+/gm, (spaces) => " ".repeat(spaces.length / 5))
+		.replace(/^([0-9]{1,9})\\([.)]) /gm, "$1$2 ")
+		.replace(/\\([\\`*_{}\[\]<>#+\-!|~&=])/g, "$1");
+}
+
 export function createCredentialRedactionProvider(redactPieces: (pieces: string[], signal: AbortSignal) => Promise<unknown>) {
 	let startup: Promise<boolean> | undefined;
 	let lifetime = new AbortController();
@@ -95,15 +101,31 @@ export function createCredentialRedactionProvider(redactPieces: (pieces: string[
 						const before = interruption();
 						if (before) return block(before);
 						if (!isReady) return block("not-ready");
-						const result = await redactPieces([...pieces], work.signal);
-						if (isSettled) return;
-						const after = interruption();
-						if (after) return block(after);
-						if (result === undefined) return finish({ status: "checked", requestID, policy: "pi-credentials/redact-v1", pieces });
-						if (!isRecord(result) || !Array.isArray(result.unavailable) || !result.unavailable.every((item) => typeof item === "string")) return block("invalid-output");
-						if (result.unavailable.length) return block("unavailable");
-						if (!isPieces(result.pieces, 8_388_608) || result.pieces.length !== pieces.length) return block("invalid-output");
-						finish({ status: "checked", requestID, policy: "pi-credentials/redact-v1", pieces: [...result.pieces] });
+						const decoded = pieces.map(decodeNativeMarkdown);
+						const changedIndices = pieces.flatMap((piece, index) => piece === decoded[index] ? [] : [index]);
+						let checkedPieces = pieces;
+						for (const [phase, input] of [pieces, changedIndices.map((index) => decoded[index])].entries()) {
+							if (phase === 1 && input.length === 0) break;
+							const beforePhase = interruption();
+							if (beforePhase) return block(beforePhase);
+							const result = await redactPieces([...input], work.signal);
+							if (isSettled) return;
+							const after = interruption();
+							if (after) return block(after);
+							let output = input;
+							if (result !== undefined) {
+								if (!isRecord(result) || !Array.isArray(result.unavailable) || !result.unavailable.every((item) => typeof item === "string")) return block("invalid-output");
+								if (result.unavailable.length) return block("unavailable");
+								if (!isPieces(result.pieces, 8_388_608) || result.pieces.length !== input.length) return block("invalid-output");
+								output = result.pieces;
+							}
+							if (phase === 0) checkedPieces = [...output];
+							else for (const [index, piece] of output.entries()) {
+								if (piece !== input[index]) checkedPieces[changedIndices[index]] = "[cred:redacted]";
+							}
+						}
+						if (!isPieces(checkedPieces, 8_388_608)) return block("invalid-output");
+						finish({ status: "checked", requestID, policy: "pi-credentials/redact-v1", pieces: checkedPieces });
 					})().catch(() => block(interruption() ?? "failed"));
 				});
 			} catch {
