@@ -217,6 +217,65 @@ The broker scans saved chat history for credentials that leaked before redaction
 | Redaction of your messages, tool call arguments, and tool results with the `/cred scrub` policy: each registered `api-key` and `app-password` of 8 or more characters becomes `[cred:name]`, and an unregistered key format becomes `[cred:unknown-<prefix><fingerprint>]` | Soft: backstop |
 | Credentials removed from shell startup environment variables | Required for the boundary to mean anything |
 
+## In-process redaction service v1
+
+Trusted extensions can discover a narrow runtime capability on `pi-credentials:redaction-service:v1`. This is not an agent tool or a generic helper dispatcher. Discovery carries **no source text**. The provider calls `provide` synchronously during `emit`, retains no callback, and ignores malformed, cancelled, or unloaded discovery requests. The request has exactly three fields:
+
+```ts
+const providers: CredentialRedactionServiceV1[] = [];
+const discovery = new AbortController();
+const discoveryTimer = setTimeout(() => discovery.abort(), 1_000);
+try {
+  pi.events.emit("pi-credentials:redaction-service:v1", {
+    version: 1,
+    signal: discovery.signal,
+    provide(service: CredentialRedactionServiceV1) {
+      providers.push(service);
+    },
+  });
+} finally {
+  clearTimeout(discoveryTimer);
+  discovery.abort();
+}
+```
+
+Consumers must reject missing or duplicate providers, check `version === 1`, and impose a discovery deadline of at most 1,000 ms. The callback is synchronous; do not await `emit` or accept later callbacks. A timer cannot preempt blocking JavaScript, so consumers must also reject discovery that returns after their deadline. Keep source pieces off the shared event bus; invoke the selected capability directly with a caller-owned `AbortSignal`.
+
+The exported TypeScript contracts live in `extension/redaction-service.ts`:
+
+```ts
+interface CredentialRedactionServiceV1 {
+  readonly version: 1;
+  redact(
+    request: { version: 1; requestID: string; pieces: readonly string[] },
+    options: { signal: AbortSignal }
+  ): Promise<
+    | { status: "checked"; requestID: string; policy: "pi-credentials/redact-v1"; pieces: string[] }
+    | { status: "blocked"; requestID: string; code:
+        | "not-ready" | "unavailable" | "timeout" | "cancelled"
+        | "invalid-input" | "invalid-output" | "failed" }
+  >;
+}
+```
+
+`requestID` is a non-content correlation identifier: 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`, starting with a letter or digit. Invalid identifiers return `requestID: ""` and `invalid-input`; other results echo the valid identifier. Consumers must verify the matching identifier, exact policy, returned piece count and shape before using a checked result. `checked` explicitly acknowledges unchanged text too; an absent result is never success.
+
+| Bound | Limit |
+|---|---|
+| Input pieces | 1,000, including empty pieces |
+| Each input piece | 1,048,576 UTF-8 bytes |
+| Total input | 4,194,304 UTF-8 bytes |
+| Total output | 8,388,608 UTF-8 bytes |
+| Service deadline | 10,000 ms, including startup readiness and redaction |
+
+Inputs and outputs must be arrays of strings with well-formed Unicode and the same piece count. Oversized inputs are refused, never clipped. Piece boundaries are preserved, not joined to detect secrets split across pieces. Requests snapshot caller input before waiting. Failed or missing startup returns `not-ready`; the initial resolved foreground-hook promise is not proof of startup. Pending startup must finish successfully within the service deadline. Any unavailable credential blocks the entire result, even if the text appears unchanged. Blocked results contain only status, correlation identifier, and a fixed code; service failures never include input, partial output, helper diagnostics, or arbitrary exception text, and the service does not log them.
+
+Cancellation, deadline expiry, startup reinitialization, and `session_shutdown` revoke pending work; late completions cannot become checked results. Retained capabilities from a shutdown session remain blocked. Discover again after the next session starts or the extension reloads. Caller cancellation aborts the runtime redactor as well, but does not itself stop credential startup shared with foreground hooks.
+
+This service reuses the existing private redactor and `pi-credentials/redact-v1` policy: registered `api-key` and `app-password` values of at least eight characters, their supported encoded forms, and recognized unknown key formats. After the raw check, it also checks changed decoded views of the native memory paragraph encoder: leading `&#32;` spaces, backslash-escaped punctuation, and leading ordered-list punctuation. Entities are decoded before backslash escapes, once only. Both sequential checks use the same private redactor, per-call bounds, cancellation signal, and overall deadline; original and decoded pieces are never combined into an oversized helper request. A replacement in a decoded view withholds that entire original piece as `[cred:redacted]`; clean escaped pieces retain their exact original bytes, and raw replacements are otherwise preserved. This is not general Markdown or arbitrary-encoding detection. It does not add credential grants, expose values, rewrite archives or memories, or admit protected-file bodies. Passwords, passcodes, short values, unrecognized formats, arbitrary transformations, and visual or split secrets remain outside that policy. Protected-source omission and provenance checks are still required. A policy identifier is not cryptographic proof, and the shared bus does not authenticate providers or isolate malicious installed extension code. Use trusted installation assumptions.
+
+The service alone does not protect native frozen input, queue evidence, or model dispatch. Consumers own pre-admission integration, source authority, missing/duplicate-provider refusal, and their persistence boundary. Do not use fabricated tool events, archive scrub flags, or direct helper imports as a substitute.
+
 ## Limits
 
 - Any process running as you can trigger a Keychain prompt. If you approve it by mistake, it gets the value.

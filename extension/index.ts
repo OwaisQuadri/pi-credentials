@@ -9,6 +9,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { callHelper, describeLeaks, describeListing, describeScope, HelperError, helperBuild, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
 import { isBuildNeeded } from "pi-compiled";
+import { createCredentialRedactionProvider, credentialRedactionDiscoveryEvent } from "./redaction-service.ts";
 
 const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
@@ -202,13 +203,20 @@ interface Redaction {
 	unavailable: string[];
 }
 
-async function redactPieces(pieces: string[]): Promise<{ pieces: string[]; unavailable: string[] } | undefined> {
+async function redactPieces(pieces: string[], signal = AbortSignal.timeout(10_000)): Promise<{ pieces: string[]; unavailable: string[] } | undefined> {
 	let separator = `\u0000${randomUUID()}\u0000`;
 	while (pieces.some((piece) => piece.includes(separator))) separator = `\u0000${randomUUID()}\u0000`;
-	const result = await callHelper<Redaction>("redact", { text: pieces.join(separator) }, AbortSignal.timeout(10_000));
-	if (!result.redacted.length && !result.unknown?.length && !result.unavailable.length) return undefined;
-	const redacted = result.text.split(separator);
+	const text = pieces.join(separator);
+	const result = await callHelper<Redaction>("redact", { text }, signal);
+	const isStringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
+	if (!result || typeof result.text !== "string" || /[\uD800-\uDFFF]/u.test(result.text) || !isStringArray(result.redacted) || !isStringArray(result.unavailable)
+		|| (result.unknown !== undefined && !isStringArray(result.unknown))) throw new Error("invalid redaction result.");
+	const redacted = pieces.length === 0 && result.text === "" ? [] : result.text.split(separator);
 	if (redacted.length !== pieces.length) throw new Error("redaction changed its structure.");
+	if (!result.redacted.length && !result.unknown?.length && !result.unavailable.length) {
+		if (result.text !== text) throw new Error("invalid redaction result.");
+		return undefined;
+	}
 	return { pieces: redacted, unavailable: result.unavailable };
 }
 
@@ -505,6 +513,13 @@ async function offerGrant(name: string, ctx: ExtensionContext, usableKinds: Kind
 
 export default function piCredentials(pi: ExtensionAPI) {
 	currentRun = randomUUID();
+	let redactionProvider = createCredentialRedactionProvider(redactPieces);
+	let stopRedactionDiscovery: (() => void) | undefined = pi.events.on(credentialRedactionDiscoveryEvent, (payload) => redactionProvider.discover(payload));
+	pi.on("session_shutdown", async () => {
+		redactionProvider.dispose();
+		stopRedactionDiscovery?.();
+		stopRedactionDiscovery = undefined;
+	});
 	pi.registerEntryRenderer<{ lines: string[]; run: string }>("pi-credentials-leaks", (entry, _options, theme) => {
 		const [header, ...rest] = entry.data?.lines ?? [];
 		if (!header || entry.data?.run !== currentRun) return undefined;
@@ -515,11 +530,17 @@ export default function piCredentials(pi: ExtensionAPI) {
 		return box;
 	});
 	pi.on("session_start", async (_event, ctx) => {
-		ready = start(ctx);
+		if (!stopRedactionDiscovery) {
+			redactionProvider = createCredentialRedactionProvider(redactPieces);
+			stopRedactionDiscovery = pi.events.on(credentialRedactionDiscoveryEvent, (payload) => redactionProvider.discover(payload));
+		}
+		const startup = start(ctx);
+		redactionProvider.initialize(startup);
+		ready = startup.then(() => undefined);
 		if (!(await isBuildNeeded(helperBuild).catch(() => true))) await ready;
 	});
 
-	async function start(ctx: ExtensionContext): Promise<void> {
+	async function start(ctx: ExtensionContext): Promise<boolean> {
 		const note = (text?: string) => { try { if (ctx.hasUI) ctx.ui.setWidget("pi-credentials-notice", text === undefined ? undefined : [`pi-credentials: ${text}`]); } catch {} };
 		note();
 		try {
@@ -532,7 +553,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 				const lines = describeLeaks(report);
 				if (lines && ctx.hasUI) pi.appendEntry("pi-credentials-leaks", { lines, run: currentRun });
 			}).catch(() => undefined);
-		} catch (error) { note((error as Error).message); }
+			return true;
+		} catch (error) { note((error as Error).message); return false; }
 	}
 
 	pi.on("input", async (event, ctx) => {
