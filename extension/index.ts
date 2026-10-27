@@ -10,6 +10,7 @@ import { Container, Text } from "@earendil-works/pi-tui";
 import { callHelper, describeLeaks, describeListing, describeScope, HelperError, helperBuild, kinds, prepareHelper, type Catalog, type Kind, type LeakReport } from "./helper.ts";
 import { isBuildNeeded } from "pi-compiled";
 import { createCredentialRedactionProvider, credentialRedactionDiscoveryEvent } from "./redaction-service.ts";
+import { SudoSession } from "./sudo-session.ts";
 
 const subcommands: Record<string, string> = {
 	list: "Show registered credentials and where agents may use them",
@@ -512,10 +513,12 @@ async function offerGrant(name: string, ctx: ExtensionContext, usableKinds: Kind
 }
 
 export default function piCredentials(pi: ExtensionAPI) {
+	let sudoSession = new SudoSession();
 	currentRun = randomUUID();
 	let redactionProvider = createCredentialRedactionProvider(redactPieces);
 	let stopRedactionDiscovery: (() => void) | undefined = pi.events.on(credentialRedactionDiscoveryEvent, (payload) => redactionProvider.discover(payload));
 	pi.on("session_shutdown", async () => {
+		sudoSession.close();
 		redactionProvider.dispose();
 		stopRedactionDiscovery?.();
 		stopRedactionDiscovery = undefined;
@@ -530,6 +533,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 		return box;
 	});
 	pi.on("session_start", async (_event, ctx) => {
+		sudoSession.close();
+		sudoSession = new SudoSession();
 		if (!stopRedactionDiscovery) {
 			redactionProvider = createCredentialRedactionProvider(redactPieces);
 			stopRedactionDiscovery = pi.events.on(credentialRedactionDiscoveryEvent, (payload) => redactionProvider.discover(payload));
@@ -636,7 +641,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "cred_sudo",
 		label: "Run as root",
-		description: "Run one command as root with a registered password. The user approves the exact command with Touch ID each time. Needs a user present.",
+		description: "Run a command as root with a registered password. Touch ID approves that credential, working directory and local or remote destination once for the live Pi session. Each command still requires a current credential grant. New, resumed, forked or reloaded sessions need fresh approval. Cancellation or helper exit clears approval. Needs a user present.",
 		parameters: Type.Object({
 			name: Type.String({ description: "Registered password credential, such as the Mac login password." }),
 			command: Type.Array(Type.String(), { description: "Program and arguments, without sudo. Use an absolute program path for remote execution. The helper quotes remote arguments.", minItems: 1 }),
@@ -646,9 +651,11 @@ export default function piCredentials(pi: ExtensionAPI) {
 		async execute(_id, input, signal, _update, ctx) {
 			if (!ctx.hasUI) throw new Error("No user is present to approve a root command. Record the need and continue with other work.");
 			const isRemote = Object.hasOwn(input, "sshTarget");
+			const rootSession = sudoSession;
+			const requestBase = base(ctx);
 			try {
-				const result = await useCredential(input.name, ctx, ["password"], signal, () => callHelper<ProcessResult>(isRemote ? "ssh-sudo" : "sudo", {
-					...base(ctx), name: input.name, arguments: input.command, timeoutSeconds: input.timeoutSeconds,
+				const result = await useCredential(input.name, ctx, ["password"], signal, () => rootSession.call<ProcessResult>(isRemote ? "ssh-sudo" : "sudo", {
+					...requestBase, name: input.name, arguments: input.command, timeoutSeconds: input.timeoutSeconds,
 					...(isRemote ? { sshTarget: input.sshTarget } : {}),
 				}, signal));
 				if (isRemote) {

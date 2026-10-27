@@ -9,6 +9,15 @@ const directory = mkdtempSync(join(tmpdir(), "pi-credentials-test-"));
 after(() => rmSync(directory, { recursive: true, force: true }));
 const fake = join(directory, "helper");
 writeFileSync(fake, `#!/bin/sh
+if [ "$1" = sudo-session ]; then
+  while IFS= read -r line; do
+    command=$(printf '%s' "$line" | /usr/bin/python3 -c 'import json,sys; i=json.load(sys.stdin); json.dump(i["input"],open("${directory}/sudo.json","w")); print(i["command"])')
+    printf '%s\\n' "$command" >> "${directory}/sudo-calls"
+    if [ -e "${directory}/sudo-response" ]; then cat "${directory}/sudo-response"; printf '\\n';
+    else echo '{"status":0,"stdout":"fixture","stderr":"","isTruncated":false,"isTimedOut":false}'; fi
+  done
+  exit 0
+fi
 input=$(cat)
 case "$1" in
   sudo|ssh-sudo)
@@ -68,6 +77,7 @@ extension({
 	appendEntry: () => undefined,
 	registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { tools[tool.name] = tool; },
 } as never);
+after(() => handlers.session_shutdown({}, {}));
 
 test("piCredentials session_shutdown revokes redaction discovery and restart requires successful startup", async () => {
 	const ctx = { cwd: directory, hasUI: false, sessionManager: { getSessionDir: () => undefined }, ui: { notify: () => undefined } };

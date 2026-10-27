@@ -102,6 +102,18 @@ export class HelperError extends Error {
 	}
 }
 
+export function parseHelperOutput<T>(output: string): T {
+	let parsed: { error?: { code: string; message: string } } & T;
+	try { parsed = JSON.parse(output); }
+	catch { throw new HelperError("helper-output", "pi-credentials helper returned invalid output."); }
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new HelperError("helper-output", "pi-credentials helper returned invalid output.");
+	if (parsed.error) {
+		if (typeof parsed.error !== "object" || typeof parsed.error.code !== "string" || typeof parsed.error.message !== "string") throw new HelperError("helper-output", "pi-credentials helper returned invalid output.");
+		throw new HelperError(parsed.error.code, parsed.error.message);
+	}
+	return parsed;
+}
+
 export function callHelper<T>(command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(helperPath, [command], { stdio: ["pipe", "pipe", "ignore"], signal });
@@ -117,15 +129,8 @@ export function callHelper<T>(command: string, input: Record<string, unknown>, s
 			reject(new HelperError("helper-unavailable", `pi-credentials helper failed to start (${error.message}). Run scripts/build.zsh in the package.`));
 		});
 		child.on("close", () => {
-			let parsed: { error?: { code: string; message: string } } & T;
-			try { parsed = JSON.parse(output); }
-			catch { return reject(new HelperError("helper-output", "pi-credentials helper returned invalid output.")); }
-			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return reject(new HelperError("helper-output", "pi-credentials helper returned invalid output."));
-			if (parsed.error) {
-				if (typeof parsed.error !== "object" || typeof parsed.error.code !== "string" || typeof parsed.error.message !== "string") return reject(new HelperError("helper-output", "pi-credentials helper returned invalid output."));
-				return reject(new HelperError(parsed.error.code, parsed.error.message));
-			}
-			resolve(parsed);
+			try { resolve(parseHelperOutput<T>(output)); }
+			catch (error) { reject(error); }
 		});
 		child.stdin.end(JSON.stringify(input));
 	});

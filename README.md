@@ -27,7 +27,7 @@ Use the identifier returned by `/project create` in place of `<project-id>`.
 
 - Keep credential values in macOS Keychain, out of the model context, tool results, logs, and saved transcripts.
 - Show which credentials an agent may use in the current project, what each one is for, and what it can do.
-- Remove you as a blocker. After you grant a credential, agents use it without a prompt.
+- Remove you as a blocker. Granted credentials need no use prompt, except the first root approval for each scope in a live Pi session.
 
 ## Who it serves
 
@@ -96,7 +96,7 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 |---|---|---|
 | `api-key` | `cred_request` | HTTP request with the key in a header. Refused for hosts outside the allowed list, when one is set. |
 | `password` | `cred_type` | Types into a named app window, in the background when the app allows it. |
-| `password` | `cred_sudo` | Runs one command as root. **Asks you to approve each exact command.** |
+| `password` | `cred_sudo` | Runs a command as root with [session approval](#root-session-approval). |
 | `app-password` | `cred_notarize` | Runs `xcrun notarytool` with the password on standard input. |
 | `passcode` | `cred_type` | Same as above. |
 | `api-key`, `app-password` | `cred_env`, `/cred env`, `cred env create` | Writes a `.env` file with the credentials granted to this project. |
@@ -104,11 +104,17 @@ Each kind has fixed actions. The helper delivers the value itself; the model nev
 
 `cred_type` takes a running app's bundle identifier or name. Exactly one running app must match, its bundle identifier must be in the credential's allowed apps, and its signature must chain to Apple for that identifier. A credential with no allowed apps is never typed. Allow only apps that do not save or show typed text, such as iPhone Mirroring or a password dialog; a terminal or text editor would let an agent read the value back. The helper sends each key to that app's process. By default it brings the app to the front first and stops if another app takes focus. With `isActivating: false` it types in the background, which works only in apps that accept background input. The helper needs Accessibility permission: System Settings > Privacy & Security > Accessibility.
 
-Without `sshTarget`, `cred_sudo` runs one local argument list, not a shell string. The helper resolves a bare program name in `/usr/bin:/bin:/usr/sbin:/sbin` only. An absolute path must name a program that root owns, in directories that only root can change, so nobody can swap it after approval. Touch ID shows the resolved command in full each time, and the helper refuses a command too long to show. The helper gives the password to `sudo -v`, runs the command with `sudo -n` and an empty standard input, then clears the sudo timestamp. When you cancel the tool or the time limit passes, the helper uses the password again to send the command and its child processes a stop signal as root, then a kill signal 3 seconds later, and still clears the timestamp. A process that detaches from the command is not stopped. If the stop fails, the result says that the command may still be running. A cancel that arrives before the command starts stops it from starting. It needs a user present. With `timestamp_timeout=0` in sudoers, the second step fails with `sudo-no-timestamp`. With Touch ID for sudo (`pam_tid`), sudo can show its own Touch ID prompt during the first step, and during a stop after the sudo timestamp expires.
+### Root session approval
+
+The first `cred_sudo` call asks for Touch ID or login-password confirmation. It approves root commands for that credential, canonical working directory and exact local or supplied SSH destination in the live Pi session. Another credential, directory or destination needs its own approval. Credential metadata changes also need fresh approval. Approval permits different commands within the user's task, not unrelated work.
+
+The signed helper retains only approved scope metadata in memory. Every call reloads the catalog, checks the current grant, validates the command, reads the password for that action and logs the result. No approval token or password cache is written to disk or the transcript. New, resumed, forked and reloaded sessions start a new helper and need fresh approval. Cancellation or helper exit also loses approval; a failed command is never replayed automatically. Closing a session blocks its queued calls. Catalog changes still need their own owner confirmation. A root call still requires an interactive client.
+
+Without `sshTarget`, `cred_sudo` runs one local argument list, not a shell string. The helper resolves a bare program name in `/usr/bin:/bin:/usr/sbin:/sbin` only. An absolute path must name a program that root owns, in directories that only root can change, so nobody can swap it after approval. The helper still resolves and validates every command and refuses command descriptions over 400 characters. The helper gives the password to `sudo -v`, runs the command with `sudo -n` and an empty standard input, then clears the sudo timestamp. When you cancel the tool or the time limit passes, the helper uses the password again to send the command and its child processes a stop signal as root, then a kill signal 3 seconds later, and still clears the timestamp. A process that detaches from the command is not stopped. If the stop fails, the result says that the command may still be running. A cancel that arrives before the command starts stops it from starting. It needs a user present. With `timestamp_timeout=0` in sudoers, the second step fails with `sudo-no-timestamp`. With Touch ID for sudo (`pam_tid`), sudo can show its own Touch ID prompt during the first step, and during a stop after the sudo timestamp expires.
 
 Supply optional `sshTarget` to run remotely, for example `cred_sudo({ name: "<password-name>", sshTarget: "<user>@<host>", command: ["/usr/bin/id"] })`. Replace the placeholders before use. A supplied target, even an empty one, selects the distinct `ssh-sudo` helper operation. Invalid targets refuse; older helpers require a rebuild and never fall back to local sudo. Targets support ASCII SSH aliases or hostnames with an optional username, up to 255 bytes. Ports belong in trusted SSH configuration; URLs, IPv6 literals, flags, whitespace and shell syntax are refused. Remote program paths must be absolute. Arguments are quoted as literal data across both remote shell boundaries.
 
-Remote sudo requires an already enrolled known host and a usable public key that needs no interaction. Fixed SSH options refuse unknown or changed host keys, password and keyboard-interactive authentication, prompts, agent forwarding and connection sharing. Owner authentication (Touch ID or login-password confirmation) shows the credential, exact supplied destination, remote cwd `/`, and complete escaped argv. Approval text over 400 characters refuses rather than truncates. Local `cwd` selects project grants and the SSH process directory, never the remote directory. SSH aliases, configuration (including proxies and trust sources), login startup environment, single-quote-compatible login command parsing, `/bin/zsh`, `/usr/bin/sudo` and the approved remote program are trusted. This does not verify remote ownership or independently resolve the recipient shown for approval.
+Remote sudo requires an already enrolled known host and a usable public key that needs no interaction. Fixed SSH options refuse unknown or changed host keys, password and keyboard-interactive authentication, prompts, agent forwarding and connection sharing. The first owner confirmation shows the credential, exact supplied destination and local working directory for the session scope. Scope text over 400 characters refuses rather than truncates. Each remote command still checks its complete escaped argument description against the 400-character limit and logs remote cwd `/` with the command. Local `cwd` selects project grants and the SSH process directory, never the remote directory. SSH aliases, configuration (including proxies and trust sources), login startup environment, single-quote-compatible login command parsing, `/bin/zsh`, `/usr/bin/sudo` and the approved remote program are trusted. This does not verify remote ownership or independently resolve the recipient shown for approval.
 
 One persistent remote Z shell, started with `-f`, invalidates the sudo timestamp, sends the password only to `sudo -S -v`, then runs `sudo -n -- <argv>` with `/dev/null` stdin. Commands receive no leftover password input even when cached or NOPASSWD validation consumes none. Empty passwords and passwords containing NUL, CR or LF refuse. Invalidation and validation failures prevent execution; incompatible or zero-duration timestamp policy fails without weakening sudoers. The shell retains the same parent identity for validation and execution and attempts cleanup while preserving command status.
 
@@ -134,7 +140,7 @@ ln -s <package directory>/scripts/cred.zsh ~/.local/bin/cred
 
 - Fuzzy Tab completion at each position, like `/model`: subcommand, then credential name with its description trimmed to the terminal width, then scope.
 - `/cred list` opens a scrollable picker: name, kind, description, grants, last use.
-- **Owner confirmation is required for add, register, edit, grant, revoke, group, delete, rotated, and scrub.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Use needs no prompt.
+- **Owner confirmation is required for add, register, edit, grant, revoke, group, delete, rotated, and scrub.** macOS asks for Touch ID, or your login password when Touch ID is unavailable. The prompt names the change, such as the old and new hosts, the group patterns, or the Keychain item to take over. Credential use needs no prompt except root session approval.
 - `/cred edit` changes the value or the metadata: description, kind, hosts, apps, rotation link, and environment variable. It never shows the value. A new value counts as a rotation.
 - `/cred grant <credential> project:<identifier>` grants a credential to an explicit project through the same owner confirmation as other grants. Tab completion shows project names beside their scopes.
 
@@ -281,7 +287,7 @@ The service alone does not protect native frozen input, queue evidence, or model
 - Any process running as you can trigger a Keychain prompt. If you approve it by mistake, it gets the value.
 - A program that reads a `.env` file, or receives a variable, can print the value in a transformed form, such as reversed or split, that redaction misses.
 - A server that receives a key can log it.
-- `cred_sudo` gives root to each approved command. Root can bypass every layer above.
+- `cred_sudo` session approval permits root commands for the approved scope, not just the first command. Root can bypass every layer above.
 - **Anything signed with the same identifier and team reads registered items without a dialog.** An agent with a shell can sign its own binary that way, or change this repository and rebuild. The startup build runs without asking. It refuses uncommitted changes and any commit other than the fetched upstream one, but an agent that can commit to the installed clone and also move its upstream-tracking ref, or put a program named `swift` on your `PATH`, can still get its code built and signed. The build checks come from pi-compiled's latest `main`, so anyone who can push to that repository can also change what gets built. Make your signing key ask before each use: run `security set-key-partition-list` without `codesign:` for that key, or keep the identity in a separate locked keychain.
 - **Project scope is advisory against an agent that can run the helper.** The helper resolves membership and legacy remote groups from the directory it receives. An agent can give it another directory. Explicit membership does not fix this cwd spoofing limitation. The command guard should block direct helper calls from the shell.
 - Redaction finds the plain value, standard and URL-safe base64, percent-encoding of every character except `A-Z a-z 0-9 - . _ ~` (upper or lower case escapes, `+` for spaces), and JSON-escaped slashes. Other encoders, partial values, and transformed values get through.
@@ -302,7 +308,7 @@ The service alone does not protect native frozen input, queue evidence, or model
 | `cred_list` | Names, kinds, descriptions, hosts, and whether this project may use each credential |
 | `cred_request` | An https request with a registered `api-key`. When the credential is not granted and you are present, Pi offers the grant. |
 | `cred_type` | Types a registered `password` or `passcode` into a running app |
-| `cred_sudo` | Runs one command as root with a registered `password`, locally or with optional `sshTarget`, after owner authentication shows the exact command and destination |
+| `cred_sudo` | Runs a command as root with a registered `password`, locally or with optional `sshTarget`; see [root session approval](#root-session-approval) |
 | `cred_notarize` | Runs `xcrun notarytool` with a registered `app-password` |
 | `cred_env` | Writes a `.env` file with the credentials granted to this project |
 | `cred_ask` | Asks you to enter a new secret, or saves a `secret` handle from `ask_user_question`; the value goes straight to Keychain |
@@ -323,7 +329,7 @@ Build and sign the helper:
 
 The script signs with your Developer ID identity when one exists. Set `PI_CREDENTIALS_SIGNING_IDENTITY` to choose another identity.
 
-Each command reads one JSON object from standard input and writes one JSON object to standard output. An error is `{"error": {"code", "message"}}` with exit status 1.
+Each one-shot command reads one JSON object from standard input and writes one JSON object to standard output. An error is `{"error": {"code", "message"}}` with exit status 1. The extension uses the persistent `sudo-session` command for root session approval. It accepts one JSON line containing `{ command, input }` at a time, for `sudo` or `ssh-sudo` only, and returns one result or error line. Each input requires `session` and an absolute `cwd`. Errors do not end the stream. Closing standard input or cancelling the helper ends the session; approval never survives a new process. Direct one-shot `sudo` and `ssh-sudo` retain per-command owner confirmation.
 
 | Command | Input | Touch ID |
 |---|---|---|
