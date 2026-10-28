@@ -77,6 +77,9 @@ export class SudoSession {
 				},
 				reject,
 			};
+		}).catch((error) => {
+			if (this.child === child) this.stop(error);
+			throw error;
 		}).finally(() => clearTimeout(timeout));
 	}
 

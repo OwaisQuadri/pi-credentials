@@ -17,7 +17,7 @@ process.stdin.on("data", (chunk) => fs.appendFileSync(${JSON.stringify(submitted
 if (protocol === "legacy") {
   process.stdin.on("end", () => process.stdout.write(JSON.stringify({ error: { code: "unknown-command", message: "Unknown command" } })));
 } else {
-process.stdout.write(JSON.stringify({ protocol: Number(protocol) }) + "\\n");
+process.stdout.write(JSON.stringify(protocol === "error" ? { error: { code: "unknown-command", message: "Unsupported command" } } : { protocol: Number(protocol) }) + "\\n");
 let count = 0;
 createInterface({ input: process.stdin }).on("line", (line) => {
   const { command, input } = JSON.parse(line);
@@ -39,10 +39,12 @@ type Reply = { command: string; input: { name: string }; count: number; pid: num
 test("unsupported helpers fail within a deadline before receiving a root command", { timeout: 10_000 }, async () => {
 	const session = new SudoSession();
 	try {
-		for (const version of ["legacy", "0"]) {
+		for (const version of ["legacy", "0", "error"]) {
 			writeFileSync(protocol, version);
 			rmSync(submitted, { force: true });
-			await assert.rejects(session.call("ssh-sudo", { name: "one" }), { code: "helper-incompatible" });
+			const code = version === "error" ? "unknown-command" : "helper-incompatible";
+			await assert.rejects(session.call("ssh-sudo", { name: "one" }), { code });
+			if (version === "error") await assert.rejects(session.call("sudo", { name: "two" }), { code });
 			assert.equal(existsSync(submitted) ? readFileSync(submitted, "utf8") : "", "");
 		}
 		rmSync(protocol);
