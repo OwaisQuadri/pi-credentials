@@ -9,9 +9,19 @@ export class SudoSession {
 	private isClosed = false;
 
 	call<T>(command: "sudo" | "ssh-sudo", input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-		const result = this.queue.then(() => this.send(command, input, signal));
+		const aborted = () => new HelperError(
+			(signal?.reason as Error | undefined)?.name === "TimeoutError" ? "timeout" : "aborted",
+			"The credential operation stopped. Root session approval was cleared.",
+		);
+		const cancel = () => this.stop(aborted());
+		signal?.addEventListener("abort", cancel, { once: true });
+		if (signal?.aborted) cancel();
+		const result = this.queue.then(() => {
+			if (signal?.aborted) { cancel(); throw aborted(); }
+			return this.send(command, input);
+		});
 		this.queue = result.catch(() => undefined);
-		return result as Promise<T>;
+		return result.finally(() => signal?.removeEventListener("abort", cancel)) as Promise<T>;
 	}
 
 	close(): void {
@@ -54,23 +64,12 @@ export class SudoSession {
 		return child;
 	}
 
-	private async send(command: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+	private send(command: string, input: Record<string, unknown>): Promise<unknown> {
 		if (this.isClosed) throw new HelperError("aborted", "The Pi session ended. Root approval was cleared.");
-		const aborted = () => new HelperError(
-			(signal?.reason as Error | undefined)?.name === "TimeoutError" ? "timeout" : "aborted",
-			"The credential operation stopped. Root session approval was cleared.",
-		);
-		if (signal?.aborted) throw aborted();
 		const child = this.child ?? this.start();
-		const cancel = () => { if (this.child === child) this.stop(aborted()); };
-		try {
-			return await new Promise((resolve, reject) => {
-				this.pending = { resolve, reject };
-				signal?.addEventListener("abort", cancel, { once: true });
-				child.stdin!.write(`${JSON.stringify({ command, input })}\n`);
-			});
-		} finally {
-			signal?.removeEventListener("abort", cancel);
-		}
+		return new Promise((resolve, reject) => {
+			this.pending = { resolve, reject };
+			child.stdin!.write(`${JSON.stringify({ command, input })}\n`);
+		});
 	}
 }

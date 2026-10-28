@@ -36,7 +36,12 @@ public struct SudoApprovals: Sendable {
     guard subject.count <= 400 else {
       throw CredentialError("approval-too-long", "The root session scope is too long to show in full.")
     }
-    try authenticate(subject)
+    do {
+      try authenticate(subject)
+    } catch {
+      approved.removeAll()
+      throw error
+    }
     approved[scope] = credential
   }
 }

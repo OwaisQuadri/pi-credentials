@@ -63,6 +63,29 @@ private func passwordCredential() -> Credential {
   #expect(attempts == 4)
 }
 
+@Test func declinedRootAuthenticationClearsEveryEarlierScope() throws {
+  var approvals = SudoApprovals(isSession: true)
+  let credential = passwordCredential()
+  var prompts = 0
+  func authorize(target: String, isDenied: Bool = false) throws {
+    try approvals.authorize(
+      name: "test", credential: credential, session: "one", cwd: "/", target: target,
+      reason: "command", authenticate: { _ in
+        prompts += 1
+        if isDenied { throw CredentialError("auth-denied", "Denied") }
+      })
+  }
+  try authorize(target: "one")
+  try authorize(target: "two")
+  #expect(throws: CredentialError.self) {
+    try authorize(target: "three", isDenied: true)
+  }
+  try authorize(target: "one")
+  try authorize(target: "two")
+  try authorize(target: "one")
+  #expect(prompts == 5)
+}
+
 @Test func oneShotRootApprovalStillAuthenticatesEachCommand() throws {
   var approvals = SudoApprovals(isSession: false)
   var prompts: [String] = []

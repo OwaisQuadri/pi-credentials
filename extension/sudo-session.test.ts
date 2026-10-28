@@ -78,6 +78,38 @@ test("cancellation clears the helper, including queued requests, without retryin
 	} finally { session.close(); }
 });
 
+test("cancelling only a queued request clears approval and does not replay active work", async () => {
+	const session = new SudoSession();
+	const active = new AbortController();
+	const queued = new AbortController();
+	const cleanup = setTimeout(() => session.close(), 5_000);
+	try {
+		const old = await session.call<Reply>("sudo", { name: "one" });
+		const running = assert.rejects(session.call("ssh-sudo", { operation: "slow" }, active.signal), { code: "aborted" });
+		const waiting = assert.rejects(session.call("sudo", {}, queued.signal), { code: "aborted" });
+		await new Promise((resolve) => setImmediate(resolve));
+		queued.abort();
+		await Promise.all([running, waiting]);
+		assert.equal(active.signal.aborted, false);
+		const fresh = await session.call<Reply>("sudo", { name: "one" });
+		assert.notEqual(old.pid, fresh.pid);
+		assert.equal(fresh.count, 1);
+	} finally { clearTimeout(cleanup); session.close(); }
+});
+
+test("an already cancelled request clears earlier approval before the next call", async () => {
+	const session = new SudoSession();
+	const controller = new AbortController();
+	try {
+		const old = await session.call<Reply>("sudo", { name: "one" });
+		controller.abort();
+		await assert.rejects(session.call("sudo", {}, controller.signal), { code: "aborted" });
+		const fresh = await session.call<Reply>("sudo", { name: "one" });
+		assert.notEqual(old.pid, fresh.pid);
+		assert.equal(fresh.count, 1);
+	} finally { session.close(); }
+});
+
 test("helper exit and malformed output lose approval and never replay the failed request", async () => {
 	const session = new SudoSession();
 	try {
