@@ -653,6 +653,9 @@ export default function piCredentials(pi: ExtensionAPI) {
 			const isRemote = Object.hasOwn(input, "sshTarget");
 			const rootSession = sudoSession;
 			const requestBase = base(ctx);
+			const cancel = () => rootSession.cancel(signal);
+			signal?.addEventListener("abort", cancel, { once: true });
+			if (signal?.aborted) cancel();
 			try {
 				const result = await useCredential(input.name, ctx, ["password"], signal, () => rootSession.call<ProcessResult>(isRemote ? "ssh-sudo" : "sudo", {
 					...requestBase, name: input.name, arguments: input.command, timeoutSeconds: input.timeoutSeconds,
@@ -670,6 +673,8 @@ export default function piCredentials(pi: ExtensionAPI) {
 					if (!["aborted", "timeout", "cancelled", "ssh-sudo-interrupted", "ssh-sudo-failed", "helper-output", "helper-unavailable"].includes(error.code)) throw error;
 				}
 				return { content: [{ type: "text", text: remoteUncertainty }], details: {}, isError: true };
+			} finally {
+				signal?.removeEventListener("abort", cancel);
 			}
 		},
 	});

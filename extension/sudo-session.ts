@@ -9,19 +9,24 @@ export class SudoSession {
 	private isClosed = false;
 
 	call<T>(command: "sudo" | "ssh-sudo", input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
-		const aborted = () => new HelperError(
-			(signal?.reason as Error | undefined)?.name === "TimeoutError" ? "timeout" : "aborted",
-			"The credential operation stopped. Root session approval was cleared.",
-		);
-		const cancel = () => this.stop(aborted());
+		const cancel = () => this.cancel(signal);
 		signal?.addEventListener("abort", cancel, { once: true });
 		if (signal?.aborted) cancel();
 		const result = this.queue.then(() => {
-			if (signal?.aborted) { cancel(); throw aborted(); }
+			if (signal?.aborted) throw this.cancel(signal);
 			return this.send(command, input);
 		});
 		this.queue = result.catch(() => undefined);
 		return result.finally(() => signal?.removeEventListener("abort", cancel)) as Promise<T>;
+	}
+
+	cancel(signal?: AbortSignal): HelperError {
+		const error = new HelperError(
+			(signal?.reason as Error | undefined)?.name === "TimeoutError" ? "timeout" : "aborted",
+			"The credential operation stopped. Root session approval was cleared.",
+		);
+		this.stop(error);
+		return error;
 	}
 
 	close(): void {

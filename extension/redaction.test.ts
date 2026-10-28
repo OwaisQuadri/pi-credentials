@@ -10,6 +10,7 @@ after(() => rmSync(directory, { recursive: true, force: true }));
 const fake = join(directory, "helper");
 writeFileSync(fake, `#!/bin/sh
 if [ "$1" = sudo-session ]; then
+  printf '%s\\n' "$$" >> "${directory}/sudo-helpers"
   while IFS= read -r line; do
     command=$(printf '%s' "$line" | /usr/bin/python3 -c 'import json,sys; i=json.load(sys.stdin); json.dump(i["input"],open("${directory}/sudo.json","w")); print(i["command"])')
     printf '%s\\n' "$command" >> "${directory}/sudo-calls"
@@ -349,6 +350,45 @@ test("remote interruption and malformed responses never claim stopped or trigger
 	assert.equal(lateResult.isError, true);
 	assert.match(lateResult.content[0].text, /Remote completion was not confirmed/);
 	rmSync(response);
+});
+
+test("aborting a root grant selector clears earlier approval and starts a fresh helper", async () => {
+	const response = join(directory, "sudo-response");
+	const catalog = join(directory, "catalog.json");
+	const fixture = {
+		credentials: [true, false].map((isGranted) => ({ name: isGranted ? "approved" : "ungranted", description: "", kind: "password", hosts: [], apps: [], grants: isGranted ? ["global"] : [], isGranted })),
+		groups: {}, projectGroups: [], projects: {}, projectIDs: [],
+	};
+	const helper = () => readFileSync(join(directory, "sudo-helpers"), "utf8").trim().split("\n").at(-1);
+	try {
+		writeFileSync(catalog, JSON.stringify(fixture));
+		for (const isRemote of [false, true]) {
+			const controller = new AbortController();
+			let opened!: () => void;
+			const selecting = new Promise<void>((resolve) => { opened = resolve; });
+			const ctx = {
+				cwd: directory, hasUI: true, sessionManager: { getSessionId: () => "fixture-session" },
+				ui: { setStatus: () => undefined, select: (_title: string, _choices: string[], { signal }: { signal: AbortSignal }) => new Promise<undefined>((resolve) => {
+					signal.addEventListener("abort", () => resolve(undefined), { once: true });
+					opened();
+				}) },
+			};
+			const input = { name: "approved", command: ["/usr/bin/id"], ...(isRemote ? { sshTarget: "fixture-alias" } : {}) };
+			await tools.cred_sudo.execute("fixture", input, undefined, undefined, ctx);
+			const before = helper();
+			writeFileSync(response, JSON.stringify({ error: { code: "not-granted", message: "Not granted" } }));
+			const denied = assert.rejects(tools.cred_sudo.execute("fixture", { ...input, name: "ungranted" }, controller.signal, undefined, ctx), { code: "not-granted" });
+			await selecting;
+			controller.abort();
+			await denied;
+			rmSync(response);
+			await tools.cred_sudo.execute("fixture", input, undefined, undefined, ctx);
+			assert.notEqual(helper(), before);
+		}
+	} finally {
+		rmSync(response, { force: true });
+		rmSync(catalog, { force: true });
+	}
 });
 
 test("cred_ask saves a secret handle once and refuses unknown handles", async () => {
