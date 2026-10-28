@@ -44,7 +44,7 @@ export class SudoSession {
 		child?.kill("SIGTERM");
 	}
 
-	private start(): ChildProcess {
+	private start(): Promise<ChildProcess> {
 		const child = spawn(helperPath, ["sudo-session"], { stdio: ["pipe", "pipe", "ignore"] });
 		this.child = child;
 		const lines = createInterface({ input: child.stdout });
@@ -66,12 +66,24 @@ export class SudoSession {
 			lines.close();
 			fail(new HelperError("helper-unavailable", "The root helper exited. Its session approval was cleared."));
 		});
-		return child;
+		const incompatible = new HelperError("helper-incompatible", "The root helper does not support session approval. Rebuild it with scripts/build.zsh. No root command was submitted.");
+		const timeout = setTimeout(() => { if (this.child === child) this.stop(incompatible); }, 5_000);
+		return new Promise<ChildProcess>((resolve, reject) => {
+			this.pending = {
+				resolve: (reply) => {
+					if ((reply as { protocol?: unknown }).protocol === 1) return resolve(child);
+					this.stop(incompatible);
+					reject(incompatible);
+				},
+				reject,
+			};
+		}).finally(() => clearTimeout(timeout));
 	}
 
-	private send(command: string, input: Record<string, unknown>): Promise<unknown> {
+	private async send(command: string, input: Record<string, unknown>): Promise<unknown> {
 		if (this.isClosed) throw new HelperError("aborted", "The Pi session ended. Root approval was cleared.");
-		const child = this.child ?? this.start();
+		const child = this.child ?? await this.start();
+		if (this.child !== child) throw new HelperError("aborted", "The root helper stopped before the command was submitted.");
 		return new Promise((resolve, reject) => {
 			this.pending = { resolve, reject };
 			child.stdin!.write(`${JSON.stringify({ command, input })}\n`);

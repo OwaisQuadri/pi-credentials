@@ -770,6 +770,7 @@ struct SessionRequest: Decodable {
 func dispatch() async {
   let isSession = arguments[0] == "sudo-session"
   var approvals = SudoApprovals(isSession: isSession)
+  if isSession { emit(["protocol": 1]) }
   repeat {
     do {
       let command: String

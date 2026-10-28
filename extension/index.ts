@@ -667,6 +667,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 				}
 				return { content: [{ type: "text", text: describeProcess(result) }], details: { status: result.status }, isError: result.status !== 0 };
 			} catch (error) {
+				if (error instanceof HelperError && ["auth-denied", "auth-unavailable", "not-granted"].includes(error.code)) rootSession.cancel();
 				if (!isRemote) throw error;
 				if (error instanceof HelperError) {
 					if (error.code === "unknown-command") throw new HelperError(error.code, "Rebuild the pi-credentials helper to use remote sudo (scripts/build.zsh). No local command was attempted.");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -7,8 +7,17 @@ import { after, test } from "node:test";
 const directory = mkdtempSync(join(tmpdir(), "pi-root-session-"));
 after(() => rmSync(directory, { recursive: true, force: true }));
 const fixture = join(directory, "helper");
+const protocol = join(directory, "protocol");
+const submitted = join(directory, "submitted");
 writeFileSync(fixture, `#!/usr/bin/env node
+const fs = require("node:fs");
 const { createInterface } = require("node:readline");
+const protocol = fs.existsSync(${JSON.stringify(protocol)}) ? fs.readFileSync(${JSON.stringify(protocol)}, "utf8") : "1";
+process.stdin.on("data", (chunk) => fs.appendFileSync(${JSON.stringify(submitted)}, chunk));
+if (protocol === "legacy") {
+  process.stdin.on("end", () => process.stdout.write(JSON.stringify({ error: { code: "unknown-command", message: "Unknown command" } })));
+} else {
+process.stdout.write(JSON.stringify({ protocol: Number(protocol) }) + "\\n");
 let count = 0;
 createInterface({ input: process.stdin }).on("line", (line) => {
   const { command, input } = JSON.parse(line);
@@ -18,6 +27,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (input.operation === "refuse") return process.stdout.write(JSON.stringify({ error: { code: "auth-denied", message: "Denied" } }) + "\\n");
   process.stdout.write(JSON.stringify({ command, input, count: ++count, pid: process.pid }) + "\\n");
 });
+}
 `);
 chmodSync(fixture, 0o700);
 process.env.PI_CREDENTIALS_HELPER = fixture;
@@ -25,6 +35,38 @@ const { SudoSession } = await import("./sudo-session.ts");
 delete process.env.PI_CREDENTIALS_HELPER;
 
 type Reply = { command: string; input: { name: string }; count: number; pid: number };
+
+test("unsupported helpers fail within a deadline before receiving a root command", { timeout: 10_000 }, async () => {
+	const session = new SudoSession();
+	try {
+		for (const version of ["legacy", "0"]) {
+			writeFileSync(protocol, version);
+			rmSync(submitted, { force: true });
+			await assert.rejects(session.call("ssh-sudo", { name: "one" }), { code: "helper-incompatible" });
+			assert.equal(existsSync(submitted) ? readFileSync(submitted, "utf8") : "", "");
+		}
+		rmSync(protocol);
+		const fresh = await session.call<Reply>("sudo", { name: "one" });
+		assert.equal(fresh.count, 1);
+	} finally { rmSync(protocol, { force: true }); session.close(); }
+});
+
+test("cancellation during helper startup submits no root command and clears the helper", async () => {
+	const session = new SudoSession();
+	const controller = new AbortController();
+	try {
+		writeFileSync(protocol, "legacy");
+		rmSync(submitted, { force: true });
+		const pending = assert.rejects(session.call("sudo", { name: "one" }, controller.signal), { code: "aborted" });
+		await new Promise((resolve) => setImmediate(resolve));
+		controller.abort();
+		await pending;
+		assert.equal(existsSync(submitted) ? readFileSync(submitted, "utf8") : "", "");
+		rmSync(protocol);
+		const fresh = await session.call<Reply>("sudo", { name: "one" });
+		assert.equal(fresh.count, 1);
+	} finally { rmSync(protocol, { force: true }); session.close(); }
+});
 
 test("root calls share one helper, serialize concurrent requests and do not retry refusals", async () => {
 	const session = new SudoSession();

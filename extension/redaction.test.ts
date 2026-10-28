@@ -10,6 +10,7 @@ after(() => rmSync(directory, { recursive: true, force: true }));
 const fake = join(directory, "helper");
 writeFileSync(fake, `#!/bin/sh
 if [ "$1" = sudo-session ]; then
+  echo '{"protocol":1}'
   printf '%s\\n' "$$" >> "${directory}/sudo-helpers"
   while IFS= read -r line; do
     command=$(printf '%s' "$line" | /usr/bin/python3 -c 'import json,sys; i=json.load(sys.stdin); json.dump(i["input"],open("${directory}/sudo.json","w")); print(i["command"])')
@@ -43,6 +44,7 @@ case "$1" in
     echo '{"project":"11111111-1111-4111-8111-111111111111"}' ;;
   grant|revoke)
     printf '%s' "$input" > "${directory}/$1.json"
+    if [ -e "${directory}/grant-error" ]; then cat "${directory}/grant-error"; exit 1; fi
     echo '{"changed":true}' ;;
   env)
     printf '%s' "$input" > "${directory}/env.json"
@@ -352,9 +354,10 @@ test("remote interruption and malformed responses never claim stopped or trigger
 	rmSync(response);
 });
 
-test("aborting a root grant selector clears earlier approval and starts a fresh helper", async () => {
+test("root grant cancellation and refused owner authentication clear earlier approval", async () => {
 	const response = join(directory, "sudo-response");
 	const catalog = join(directory, "catalog.json");
+	const grantError = join(directory, "grant-error");
 	const fixture = {
 		credentials: [true, false].map((isGranted) => ({ name: isGranted ? "approved" : "ungranted", description: "", kind: "password", hosts: [], apps: [], grants: isGranted ? ["global"] : [], isGranted })),
 		groups: {}, projectGroups: [], projects: {}, projectIDs: [],
@@ -362,32 +365,42 @@ test("aborting a root grant selector clears earlier approval and starts a fresh 
 	const helper = () => readFileSync(join(directory, "sudo-helpers"), "utf8").trim().split("\n").at(-1);
 	try {
 		writeFileSync(catalog, JSON.stringify(fixture));
-		for (const isRemote of [false, true]) {
+		for (const mode of ["abort", "dismiss", "auth-denied", "auth-unavailable"]) for (const isRemote of [false, true]) {
 			const controller = new AbortController();
 			let opened!: () => void;
 			const selecting = new Promise<void>((resolve) => { opened = resolve; });
 			const ctx = {
 				cwd: directory, hasUI: true, sessionManager: { getSessionId: () => "fixture-session" },
-				ui: { setStatus: () => undefined, select: (_title: string, _choices: string[], { signal }: { signal: AbortSignal }) => new Promise<undefined>((resolve) => {
-					signal.addEventListener("abort", () => resolve(undefined), { once: true });
-					opened();
-				}) },
+				ui: { setStatus: () => undefined, select: (_title: string, choices: string[], { signal }: { signal: AbortSignal }) => {
+					if (mode === "dismiss") return Promise.resolve(undefined);
+					if (mode !== "abort") return Promise.resolve(choices[0]);
+					return new Promise<undefined>((resolve) => {
+						signal.addEventListener("abort", () => resolve(undefined), { once: true });
+						opened();
+					});
+				} },
 			};
 			const input = { name: "approved", command: ["/usr/bin/id"], ...(isRemote ? { sshTarget: "fixture-alias" } : {}) };
 			await tools.cred_sudo.execute("fixture", input, undefined, undefined, ctx);
 			const before = helper();
 			writeFileSync(response, JSON.stringify({ error: { code: "not-granted", message: "Not granted" } }));
-			const denied = assert.rejects(tools.cred_sudo.execute("fixture", { ...input, name: "ungranted" }, controller.signal, undefined, ctx), { code: "not-granted" });
-			await selecting;
-			controller.abort();
+			if (mode.startsWith("auth-")) writeFileSync(grantError, JSON.stringify({ error: { code: mode, message: "Owner authentication refused" } }));
+			const denied = assert.rejects(tools.cred_sudo.execute("fixture", { ...input, name: "ungranted" }, controller.signal, undefined, ctx), { code: mode.startsWith("auth-") ? mode : "not-granted" });
+			if (mode === "abort") {
+				await selecting;
+				controller.abort();
+			}
 			await denied;
+			assert.equal(controller.signal.aborted, mode === "abort");
 			rmSync(response);
+			rmSync(grantError, { force: true });
 			await tools.cred_sudo.execute("fixture", input, undefined, undefined, ctx);
 			assert.notEqual(helper(), before);
 		}
 	} finally {
 		rmSync(response, { force: true });
 		rmSync(catalog, { force: true });
+		rmSync(grantError, { force: true });
 	}
 });
 
