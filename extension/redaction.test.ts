@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { setTimeout } from "node:timers/promises";
 import { credentialRedactionDiscoveryEvent, type CredentialRedactionServiceV1 } from "./redaction-service.ts";
 
 const directory = mkdtempSync(join(tmpdir(), "pi-credentials-test-"));
@@ -34,6 +35,8 @@ case "$1" in
   grant|revoke)
     printf '%s' "$input" > "${directory}/$1.json"
     echo '{"changed":true}' ;;
+  scan)
+    if [ -e "${directory}/scan-response" ]; then cat "${directory}/scan-response"; else echo '{"leaks":[],"unknown":[],"scanned":0}'; fi ;;
   env)
     printf '%s' "$input" > "${directory}/env.json"
     echo '{"error":{"code":"not-granted","message":"The helper refused access."}}' ;;
@@ -56,6 +59,7 @@ const commands: Record<string, {
 	handler: (text: string, ctx: any) => Promise<void>;
 	getArgumentCompletions: (text: string) => { value: string; label: string; description?: string }[] | null;
 }> = {};
+const entries: Array<{ type: string; data: { lines: string[] } }> = [];
 const { default: extension } = await import("./index.ts");
 extension({
 	on: (name: string, handler: Handler) => {
@@ -65,7 +69,7 @@ extension({
 	registerCommand: (name: string, command: typeof commands[string]) => { commands[name] = command; },
 	events: { on: (channel: string, handler: (payload: unknown) => void) => { events[channel] = handler; return () => { delete events[channel]; }; }, emit: () => undefined },
 	registerEntryRenderer: () => undefined,
-	appendEntry: () => undefined,
+	appendEntry: (type: string, data: { lines: string[] }) => { entries.push({ type, data }); },
 	registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { tools[tool.name] = tool; },
 } as never);
 
@@ -107,6 +111,26 @@ test("piCredentials session_shutdown revokes redaction discovery and restart req
 	assert.equal((await check(restarted)).status, "checked");
 	assert.deepEqual(await check(initial), { status: "blocked", requestID: request.requestID, code: "not-ready" });
 	await handlers.session_shutdown({}, ctx);
+});
+
+test("startup scans keep leak findings available without an automatic banner; manual scan still shows them", async () => {
+	writeFileSync(join(directory, "scan-response"), JSON.stringify({ leaks: [{ name: "startup-fixture", sessions: 1, last: "2026-01-01" }], unknown: [], scanned: 1 }));
+	const notes: string[] = [];
+	const ctx = { cwd: directory, hasUI: true, sessionManager: { getSessionDir: () => undefined }, ui: { notify: (text: string) => notes.push(text), setWidget: () => undefined } };
+	entries.length = 0;
+	try {
+		await handlers.session_start({}, ctx);
+		for (let attempt = 0; attempt < 100 && !commands.cred.getArgumentCompletions("rotated startup-fixture")?.length; attempt++) await setTimeout(10);
+		assert.equal(commands.cred.getArgumentCompletions("rotated startup-fixture")?.[0].label, "startup-fixture");
+		assert.deepEqual(entries, []);
+		await commands.cred.handler("scan", ctx);
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].type, "pi-credentials-leaks");
+		assert.match(entries[0].data.lines.join("\n"), /1 Known and 0 Unknown/);
+		assert.match(notes.at(-1) ?? "", /Scanned 1 files/);
+	} finally {
+		rmSync(join(directory, "scan-response"));
+	}
 });
 
 test("credential variables leave the Pi process and protected files stay unread", async () => {
