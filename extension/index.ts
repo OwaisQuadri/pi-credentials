@@ -548,11 +548,7 @@ export default function piCredentials(pi: ExtensionAPI) {
 			await refresh(ctx.cwd);
 			const stripped = await stripCredentialVariables();
 			if (stripped.length) note(`removed ${stripped.join(", ")} from this Pi process. Tools now reach those credentials through the broker.`);
-			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then((report) => {
-				setLeakReport(report);
-				const lines = describeLeaks(report);
-				if (lines && ctx.hasUI) pi.appendEntry("pi-credentials-leaks", { lines, run: currentRun });
-			}).catch(() => undefined);
+			void callHelper<LeakReport>("scan", sessionDirectory(ctx)).then(setLeakReport).catch(() => undefined);
 			return true;
 		} catch (error) { note((error as Error).message); return false; }
 	}
