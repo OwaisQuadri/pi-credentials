@@ -122,7 +122,7 @@ test("startup scans keep leak findings available without an automatic banner; ma
 		await handlers.session_start({}, ctx);
 		for (let attempt = 0; attempt < 100 && !commands.cred.getArgumentCompletions("rotated startup-fixture")?.length; attempt++) await setTimeout(10);
 		assert.equal(commands.cred.getArgumentCompletions("rotated startup-fixture")?.[0].label, "startup-fixture");
-		assert.deepEqual(entries, []);
+		assert.equal(entries.length, 0);
 		await commands.cred.handler("scan", ctx);
 		assert.equal(entries.length, 1);
 		assert.equal(entries[0].type, "pi-credentials-leaks");
