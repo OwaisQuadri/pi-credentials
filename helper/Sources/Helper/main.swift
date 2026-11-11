@@ -194,7 +194,7 @@ func summary(_ credential: Credential) -> String {
     + "\(credential.description.debugDescription)\(rotation)"
 }
 
-func run(_ command: String, _ input: Input) async throws {
+func run(_ command: String, _ input: Input, approvals: inout SudoApprovals) async throws {
   let isMutating = [
     "register", "add", "edit", "grant", "revoke", "group", "delete", "rotated", "scrub",
     "project-create", "project-rename", "project-membership",
@@ -517,7 +517,10 @@ func run(_ command: String, _ input: Input) async throws {
           throw CredentialError("command-too-long", "The remote approval is too long to show in full.")
         }
         target = subject
-        try Keychain.authenticateOwner(reason: "run as root: \(subject)")
+        try approvals.authorize(
+          name: name, credential: credential, session: input.session, cwd: input.cwd,
+          target: validated.target, reason: "run as root: \(subject)",
+          authenticate: Keychain.authenticateOwner)
         remote = validated
       }
       if command == "sudo" {
@@ -530,8 +533,10 @@ func run(_ command: String, _ input: Input) async throws {
         guard shown.count <= 400 else {
           throw CredentialError("command-too-long", "The command is too long to show in full for approval.")
         }
-        try Keychain.authenticateOwner(
-          reason: "run as root with '\(name)' in \(describeCommand([input.cwd ?? "?"])): \(shown)")
+        try approvals.authorize(
+          name: name, credential: credential, session: input.session, cwd: input.cwd, target: nil,
+          reason: "run as root with '\(name)' in \(describeCommand([input.cwd ?? "?"])): \(shown)",
+          authenticate: Keychain.authenticateOwner)
       }
       let value = try Keychain.value(of: credential)
       let redaction = redactionValues(catalog)
@@ -757,14 +762,41 @@ guard arguments.count == 1 else {
   FileHandle.standardError.write(Data("usage: pi-credentials-helper <command> < request.json\n".utf8))
   exit(2)
 }
-do {
-  let data = FileHandle.standardInput.readDataToEndOfFile()
-  let input = try JSONDecoder().decode(Input.self, from: data.isEmpty ? Data("{}".utf8) : data)
-  try await run(arguments[0], input)
-} catch let error as CredentialError {
-  emit(["error": ["code": error.code, "message": error.description]])
-  exit(1)
-} catch {
-  emit(["error": ["code": "failed", "message": String(describing: error)]])
-  exit(1)
+struct SessionRequest: Decodable {
+  var command: String
+  var input: Input
 }
+
+func dispatch() async {
+  let isSession = arguments[0] == "sudo-session"
+  var approvals = SudoApprovals(isSession: isSession)
+  if isSession { emit(["protocol": 1]) }
+  repeat {
+    do {
+      let command: String
+      let input: Input
+      if isSession {
+        guard let line = readLine() else { break }
+        let request = try JSONDecoder().decode(SessionRequest.self, from: Data(line.utf8))
+        guard ["sudo", "ssh-sudo"].contains(request.command) else {
+          throw CredentialError("invalid-command", "A root session accepts only sudo and ssh-sudo.")
+        }
+        command = request.command
+        input = request.input
+      } else {
+        command = arguments[0]
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        input = try JSONDecoder().decode(Input.self, from: data.isEmpty ? Data("{}".utf8) : data)
+      }
+      try await run(command, input, approvals: &approvals)
+    } catch let error as CredentialError {
+      emit(["error": ["code": error.code, "message": error.description]])
+      if !isSession { exit(1) }
+    } catch {
+      emit(["error": ["code": "failed", "message": String(describing: error)]])
+      if !isSession { exit(1) }
+    }
+  } while isSession && !Cancellation.shared.isCancelled
+}
+
+await dispatch()
