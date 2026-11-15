@@ -35,7 +35,7 @@ import Testing
   #expect(
     catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
       == "/cred grant key global, or approve this repository in a project: "
-      + "/project create <readable name> (or /project list for an existing one), "
+      + "/project list (for an existing project) or /project create <readable name>, "
       + "/project membership add <project-id>, then /cred grant key project:<project-id>")
 }
 
@@ -46,7 +46,7 @@ import Testing
   #expect(
     catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
       == "/cred grant key global, or approve this repository in a project: "
-      + "/project create <readable name> (or /project list for an existing one), "
+      + "/project list (for an existing project) or /project create <readable name>, "
       + "/project membership add <project-id>, then /cred grant key project:<project-id>")
   #expect(
     catalog.grantFix("key", remotes: [], repository: nil)

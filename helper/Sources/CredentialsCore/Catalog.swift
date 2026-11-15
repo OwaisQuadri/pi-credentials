@@ -170,7 +170,7 @@ public struct Catalog: Codable, Equatable, Sendable {
       return (additions + ["/cred grant \(name) global"]).joined(separator: ", or ")
     }
     return "/cred grant \(name) global, or approve this repository in a project: "
-      + "/project create <readable name> (or /project list for an existing one), "
+      + "/project list (for an existing project) or /project create <readable name>, "
       + "/project membership add <project-id>, then /cred grant \(name) project:<project-id>"
   }
 
