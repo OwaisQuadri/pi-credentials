@@ -160,6 +160,12 @@ public struct Catalog: Codable, Equatable, Sendable {
     if let group = groups(forRemotes: remotes).first {
       return "/cred grant \(name) \(group)"
     }
+    guard repository != nil else {
+      return "/cred grant \(name) global. A project grant needs a working directory inside a Git repository."
+    }
+    if let project = credentials[name]?.grants.lazy.compactMap(projectID(forScope:)).first {
+      return "/project membership add \(project), or /cred grant \(name) global"
+    }
     return "/cred grant \(name) global, or approve this repository in a project: "
       + "/project create <readable name> (or /project list for an existing one), "
       + "/project membership add <project-id>, then /cred grant \(name) project:<project-id>"

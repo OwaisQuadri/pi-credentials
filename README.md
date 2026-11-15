@@ -171,7 +171,7 @@ When a credential is not granted for the current project, the refusal gives the 
 'tracker' is not granted for this project. Ask the user to run: /cred grant tracker docs
 ```
 
-For an approved project, the fix uses `/cred grant tracker project:<identifier>`. Existing matching remote groups still produce a group grant suggestion. When neither applies, the fix offers a global grant or names the project commands: `/project create`, `/project membership add`, and `/cred grant <credential> project:<identifier>`.
+For an approved project, the fix uses `/cred grant tracker project:<identifier>`. Existing matching remote groups still produce a group grant suggestion. When neither applies and the credential already has a project grant, the fix names `/project membership add <project-id>` for that project. Otherwise it offers a global grant or names the project commands: `/project create` or `/project list`, then `/project membership add <project-id>`, then `/cred grant tracker project:<project-id>`. Outside a Git repository, the fix offers only a global grant.
 
 In an interactive session, the agent offers the grant inline, and you confirm with Touch ID. In an unattended session, the agent records the block and moves to other work.
 

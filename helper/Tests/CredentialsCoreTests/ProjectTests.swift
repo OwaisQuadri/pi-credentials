@@ -22,6 +22,23 @@ import Testing
   #expect(!decoded.isGranted("key", remotes: [], repository: "/fixture/.git"))
 }
 
+@Test func grantFixNamesTheProjectCommandsWhenNothingMatches() {
+  let catalog = Catalog(
+    credentials: ["key": Credential(description: "", kind: .apiKey, service: "fixture")],
+    groups: ["work": ["example.test/org/*"]])
+  #expect(
+    catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
+      == "/cred grant key global, or approve this repository in a project: "
+      + "/project create <readable name> (or /project list for an existing one), "
+      + "/project membership add <project-id>, then /cred grant key project:<project-id>")
+  #expect(
+    catalog.grantFix("key", remotes: [], repository: nil)
+      == "/cred grant key global. A project grant needs a working directory inside a Git repository.")
+  #expect(
+    catalog.grantFix("key", remotes: ["https://example.test/org/app"], repository: "/fixture/.git")
+      == "/cred grant key work")
+}
+
 @Test func projectRenameAndMembershipRemovalPreserveGrantProvenance() throws {
   var catalog = Catalog(
     credentials: [
@@ -36,9 +53,7 @@ import Testing
   #expect(!catalog.isGranted("key", remotes: [], repository: repository))
   #expect(
     catalog.grantFix("key", remotes: [], repository: repository)
-      == "/cred grant key global, or approve this repository in a project: "
-      + "/project create <readable name> (or /project list for an existing one), "
-      + "/project membership add <project-id>, then /cred grant key project:<project-id>")
+      == "/project membership add \(id), or /cred grant key global")
   _ = try catalog.applyProjectChange(.membership(id: id, repository: repository, isAdded: true)) {
     reason in
     #expect(reason.contains("key"))
