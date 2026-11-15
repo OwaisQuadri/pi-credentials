@@ -75,6 +75,9 @@ import Testing
     catalog.grantFix("key", remotes: [], repository: repository)
       == "/project membership add \(id) (\"Readable name\"), or /cred grant key global")
   #expect(
+    catalog.grantFix("key", remotes: ["https://example.test/org/app"], repository: repository)
+      == "/cred grant key work")
+  #expect(
     catalog.grantFix("key", remotes: [], repository: nil)
       == "/cred grant key global (this directory has no usable Git repository identity, so a project grant cannot apply)")
   _ = try catalog.applyProjectChange(.membership(id: id, repository: repository, isAdded: true)) {
