@@ -163,9 +163,10 @@ public struct Catalog: Codable, Equatable, Sendable {
     guard repository != nil else {
       return "/cred grant \(name) global (this directory has no usable Git repository identity, so a project grant cannot apply)"
     }
-    let granted = (credentials[name]?.grants ?? []).compactMap(projectID(forScope:))
-    if !granted.isEmpty {
-      let additions = granted.map { "/project membership add \($0) (\(projects[$0]?.name ?? $0))" }
+    let additions = (credentials[name]?.grants ?? []).compactMap(projectID(forScope:)).compactMap { id in
+      projects[id].map { "/project membership add \(id) (\($0.name.debugDescription))" }
+    }
+    if !additions.isEmpty {
       return (additions + ["/cred grant \(name) global"]).joined(separator: ", or ")
     }
     return "/cred grant \(name) global, or approve this repository in a project: "

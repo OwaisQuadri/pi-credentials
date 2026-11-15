@@ -22,7 +22,7 @@ import Testing
   #expect(!decoded.isGranted("key", remotes: [], repository: "/fixture/.git"))
 }
 
-@Test func grantFixNamesEveryGrantedProjectWithItsName() throws {
+@Test func grantFixListsEachExistingGrantedProjectAndSkipsMissingOnes() throws {
   var catalog = Catalog(
     credentials: ["key": Credential(description: "", kind: .apiKey, service: "fixture")], groups: [:])
   let first = try catalog.applyProjectChange(.create(name: "First")) { _ in }
@@ -30,7 +30,13 @@ import Testing
   catalog.credentials["key"]!.grants = [Catalog.projectScope(first), "project:missing", Catalog.projectScope(second)]
   #expect(
     catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
-      == "/project membership add \(first) (First), or /project membership add \(second) (Second), or /cred grant key global")
+      == "/project membership add \(first) (\"First\"), or /project membership add \(second) (\"Second\"), or /cred grant key global")
+  catalog.credentials["key"]!.grants = ["project:missing"]
+  #expect(
+    catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
+      == "/cred grant key global, or approve this repository in a project: "
+      + "/project create <readable name> (or /project list for an existing one), "
+      + "/project membership add <project-id>, then /cred grant key project:<project-id>")
 }
 
 @Test func grantFixNamesTheProjectCommandsWhenNothingMatches() {
@@ -48,6 +54,9 @@ import Testing
   #expect(
     catalog.grantFix("key", remotes: ["https://example.test/org/app"], repository: "/fixture/.git")
       == "/cred grant key work")
+  #expect(
+    catalog.grantFix("key", remotes: ["https://example.test/org/app"], repository: nil)
+      == "/cred grant key work")
 }
 
 @Test func projectRenameAndMembershipRemovalPreserveGrantProvenance() throws {
@@ -64,7 +73,7 @@ import Testing
   #expect(!catalog.isGranted("key", remotes: [], repository: repository))
   #expect(
     catalog.grantFix("key", remotes: [], repository: repository)
-      == "/project membership add \(id) (Readable name), or /cred grant key global")
+      == "/project membership add \(id) (\"Readable name\"), or /cred grant key global")
   #expect(
     catalog.grantFix("key", remotes: [], repository: nil)
       == "/cred grant key global (this directory has no usable Git repository identity, so a project grant cannot apply)")
