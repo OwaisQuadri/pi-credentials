@@ -22,6 +22,17 @@ import Testing
   #expect(!decoded.isGranted("key", remotes: [], repository: "/fixture/.git"))
 }
 
+@Test func grantFixNamesEveryGrantedProjectWithItsName() throws {
+  var catalog = Catalog(
+    credentials: ["key": Credential(description: "", kind: .apiKey, service: "fixture")], groups: [:])
+  let first = try catalog.applyProjectChange(.create(name: "First")) { _ in }
+  let second = try catalog.applyProjectChange(.create(name: "Second")) { _ in }
+  catalog.credentials["key"]!.grants = [Catalog.projectScope(first), "project:missing", Catalog.projectScope(second)]
+  #expect(
+    catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
+      == "/project membership add \(first) (First), or /project membership add \(second) (Second), or /cred grant key global")
+}
+
 @Test func grantFixNamesTheProjectCommandsWhenNothingMatches() {
   let catalog = Catalog(
     credentials: ["key": Credential(description: "", kind: .apiKey, service: "fixture")],
@@ -33,7 +44,7 @@ import Testing
       + "/project membership add <project-id>, then /cred grant key project:<project-id>")
   #expect(
     catalog.grantFix("key", remotes: [], repository: nil)
-      == "/cred grant key global. A project grant needs a working directory inside a Git repository.")
+      == "/cred grant key global (this directory has no usable Git repository identity, so a project grant cannot apply)")
   #expect(
     catalog.grantFix("key", remotes: ["https://example.test/org/app"], repository: "/fixture/.git")
       == "/cred grant key work")
@@ -53,7 +64,10 @@ import Testing
   #expect(!catalog.isGranted("key", remotes: [], repository: repository))
   #expect(
     catalog.grantFix("key", remotes: [], repository: repository)
-      == "/project membership add \(id), or /cred grant key global")
+      == "/project membership add \(id) (Readable name), or /cred grant key global")
+  #expect(
+    catalog.grantFix("key", remotes: [], repository: nil)
+      == "/cred grant key global (this directory has no usable Git repository identity, so a project grant cannot apply)")
   _ = try catalog.applyProjectChange(.membership(id: id, repository: repository, isAdded: true)) {
     reason in
     #expect(reason.contains("key"))

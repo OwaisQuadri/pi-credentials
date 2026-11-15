@@ -161,10 +161,12 @@ public struct Catalog: Codable, Equatable, Sendable {
       return "/cred grant \(name) \(group)"
     }
     guard repository != nil else {
-      return "/cred grant \(name) global. A project grant needs a working directory inside a Git repository."
+      return "/cred grant \(name) global (this directory has no usable Git repository identity, so a project grant cannot apply)"
     }
-    if let project = credentials[name]?.grants.lazy.compactMap(projectID(forScope:)).first {
-      return "/project membership add \(project), or /cred grant \(name) global"
+    let granted = (credentials[name]?.grants ?? []).compactMap(projectID(forScope:))
+    if !granted.isEmpty {
+      let additions = granted.map { "/project membership add \($0) (\(projects[$0]?.name ?? $0))" }
+      return (additions + ["/cred grant \(name) global"]).joined(separator: ", or ")
     }
     return "/cred grant \(name) global, or approve this repository in a project: "
       + "/project create <readable name> (or /project list for an existing one), "
