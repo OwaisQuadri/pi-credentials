@@ -160,7 +160,9 @@ public struct Catalog: Codable, Equatable, Sendable {
     if let group = groups(forRemotes: remotes).first {
       return "/cred grant \(name) \(group)"
     }
-    return "/cred grant \(name) global, or add a project group for this repository"
+    return "/cred grant \(name) global, or approve this repository in a project: "
+      + "/project create <readable name> (or /project list for an existing one), "
+      + "/project membership add <project-id>, then /cred grant \(name) project:<project-id>"
   }
 
   public static func normalizeRemote(_ remote: String) -> String? {

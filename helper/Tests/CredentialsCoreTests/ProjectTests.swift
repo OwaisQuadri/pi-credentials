@@ -34,6 +34,11 @@ import Testing
   catalog.credentials["key"]!.grants = [Catalog.projectScope(id)]
   let repository = "/fixture/.git"
   #expect(!catalog.isGranted("key", remotes: [], repository: repository))
+  #expect(
+    catalog.grantFix("key", remotes: [], repository: repository)
+      == "/cred grant key global, or approve this repository in a project: "
+      + "/project create <readable name> (or /project list for an existing one), "
+      + "/project membership add <project-id>, then /cred grant key project:<project-id>")
   _ = try catalog.applyProjectChange(.membership(id: id, repository: repository, isAdded: true)) {
     reason in
     #expect(reason.contains("key"))
