@@ -30,7 +30,7 @@ import Testing
   catalog.credentials["key"]!.grants = [Catalog.projectScope(first), "project:missing", Catalog.projectScope(second)]
   #expect(
     catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
-      == "/project membership add \(first) (\"First\"), or /project membership add \(second) (\"Second\"), or /cred grant key global")
+      == "project \"First\": /project membership add \(first), or project \"Second\": /project membership add \(second), or /cred grant key global")
   catalog.credentials["key"]!.grants = ["project:missing"]
   #expect(
     catalog.grantFix("key", remotes: [], repository: "/fixture/.git")
@@ -73,7 +73,7 @@ import Testing
   #expect(!catalog.isGranted("key", remotes: [], repository: repository))
   #expect(
     catalog.grantFix("key", remotes: [], repository: repository)
-      == "/project membership add \(id) (\"Readable name\"), or /cred grant key global")
+      == "project \"Readable name\": /project membership add \(id), or /cred grant key global")
   #expect(
     catalog.grantFix("key", remotes: ["https://example.test/org/app"], repository: repository)
       == "/cred grant key work")
